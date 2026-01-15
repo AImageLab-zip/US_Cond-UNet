@@ -175,7 +175,7 @@ def parse_args():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=int(os.environ.get("SLURM_JOB_CPUS_PER_NODE")),
+        default=int(os.environ.get("SLURM_JOB_CPUS_PER_NODE", "8")),
         help="Number of workers for data loading.",
     )
     parser.add_argument(
