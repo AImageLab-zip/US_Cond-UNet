@@ -1,0 +1,51 @@
+# grid_sweep_config.yaml
+program: main.py    # The Python script to execute for each run
+method: grid        # Specifies an exhaustive search over all combinations
+project: uusic_cls_sweep # Replace with your actual W&B project name
+name: cls-grid-search
+
+metric:
+  name: eval_acc_mean  # Metric to track, logged by compute_metrics
+  goal: maximize       # The sweep's objective
+
+parameters:
+  # Fixed Parameters (Optional, based on your implicit requirements)
+  # You did not specify values for these, so we use their defaults from main.py
+  # It's highly recommended to fix all non-swept parameters for a clean sweep.
+  batch-size:
+    value: 64
+  epochs:
+    value: 10
+  dataset-type:
+    value: "both"
+  dataset-size:
+    value: 256
+  keep-aspect-ratio:
+    value: 1
+  lr-scheduler-type:
+    value: "cosine"
+  # Grid Search Parameters (The exhaustive list)
+  use-ccl-crop:
+    values: [0, 1] # Your request implies 0, but if you want 0/1, change to [0, 1]
+    # Note: If you want to sweep this, change to [0, 1]. For this config, it's fixed to 0 based on the initial request format.
+  
+  rn-size:
+    values: ["18", "34"]
+  
+  use-cbam:
+    values: [0, 1]
+  
+  use-film:
+    values: [0, 1]
+  
+  regr-bbox:
+    values: [0, 1]
+  
+  learning-rate:
+    values: [1e-3, 1e-4, 1e-5]
+  
+  warmup-ratio:
+    values: [0.0, 0.01]
+  
+  freeze-backbone:
+    values: [0, 1]

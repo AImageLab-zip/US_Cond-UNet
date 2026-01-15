@@ -26,20 +26,19 @@ organ_to_class_dict_for_prediction = {
     "breast_luminal": 1,
     "breast luminal": 1,
 }
-
 organ_to_class_dict = {
     "appendix": 0,
     "breast": 1,
-    "breast_luminal": 1,
     "cardiac": 2,
     "thyroid": 3,
     "fetal": 4,
     "kidney": 5,
     "liver": 6,
     "testicle": 7,
-    "new_organ": 8,
+    "breast_luminal": 1,
 }
 class_to_organ_dict = {v: k for k, v in organ_to_class_dict.items()}
+
 dataset_to_organ_dict = {
     "Appendix": "appendix",
     "private_Appendix": "appendix",
@@ -73,8 +72,9 @@ dataset_for_classification = [
     "Fatty-Liver",
     "private_Appendix",
     "private_Breast",
-    "private_Breast_luminal",
+    # "private_Breast_luminal",
     "private_Liver",
+    "private_Testicle",
 ]
 dataset_for_segmentation = [
     "BUS-BRA",
@@ -96,6 +96,7 @@ dataset_for_segmentation = [
     "private_Thyroid",
     "private_Testicle",
     "public_Testicle_syn",
+    
 ]
 
 multi_cls_labels_dict = {
@@ -120,6 +121,8 @@ multi_cls_labels_dict = {
     "appendix": [8, 9],
     "Breast": [4, 5],
     "breast": [4, 5],
+    "private_Testicle": [10, 11],
+    "testicle": [10, 11],
 }
 
 

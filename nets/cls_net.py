@@ -100,7 +100,7 @@ class OmniClsCBAM(nn.Module):
         use_cbam=True,
         use_film=False,
         n_organs=len(organ_to_class_dict.keys()),
-        num_classes=10,
+        num_classes=12,
         predict_bboxes=False,
         mlp_organ=False,
     ):
@@ -347,9 +347,10 @@ class MultiLoss(nn.Module):
             loss_multi = torch.zeros(1, device=self.device)
 
         single_loss = torch.zeros(1, device=self.device)
-        for logits, label, organ_label in zip(
+        for i, (logits, label, organ_label) in enumerate(zip(
             multi_cls_logits, multi_cls_labels, organ_labels
-        ):
+        )):
+            # Inside your loop in cls_net.py
             if label != -100:
                 dataset_name = dataset_names[organ_label]
                 labels_set = multi_cls_labels_dict[dataset_name]

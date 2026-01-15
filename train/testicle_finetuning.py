@@ -11,8 +11,8 @@ from nets.cls_net import OmniClsCBAM
 from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
 from utils.utils import (
     organ_to_class_dict,
-    class_to_organ_dict,
     multi_cls_labels_dict,
+    class_to_organ_dict,
     get_sft_transforms,
     compute_dsc,
     compute_nsd,
@@ -225,7 +225,7 @@ def train(args: Namespace):
         config=args,
     )
     if args.use_medsam:
-        from MedSAM.segment_anything import sam_model_registry
+        from segment_anything import sam_model_registry
 
         sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
 
@@ -244,7 +244,7 @@ def train(args: Namespace):
         print(load_result)
 
     elif args.use_medsam_prompt:
-        from MedSAM.segment_anything import sam_model_registry
+        from segment_anything import sam_model_registry
 
         sam_model = sam_model_registry["vit_b"](
             checkpoint=MEDSAM_BASE_WEIGHTS

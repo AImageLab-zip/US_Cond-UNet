@@ -1,6 +1,6 @@
 from collections import defaultdict
 import json
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import os, sys, torch, random
 from pathlib import Path
 import numpy as np
@@ -17,7 +17,37 @@ from utils.utils import (
 )
 from PIL import Image
 from torchvision.transforms.v2.functional import pil_to_tensor, center_crop
+from transformers import AutoImageProcessor, AutoModel
+from transformers.image_utils import load_image
+from tqdm import tqdm 
+from sklearn.cluster import KMeans
+from sklearn.neighbors import NearestNeighbors
+import numpy as np
 
+class ImageDataset(Dataset):
+    def __init__(self, items, processor):
+        self.items = items
+        self.processor = processor
+    
+    def __len__(self):
+        return len(self.items)
+    
+    def __getitem__(self, idx):
+        item = self.items[idx]
+        image = load_image(item['image_path'])
+        inputs = self.processor(images=image, return_tensors="pt")
+        # Remove batch dimension added by processor
+        return {k: v.squeeze(0) for k, v in inputs.items()}, idx
+
+def collate_fn(batch):
+    """Custom collate to handle variable-sized inputs"""
+    inputs_list, indices = zip(*batch)
+    # Stack inputs
+    batched_inputs = {
+        key: torch.stack([inp[key] for inp in inputs_list])
+        for key in inputs_list[0].keys()
+    }
+    return batched_inputs, list(indices)
 
 class USdatasetOmni(Dataset):
     def __init__(
@@ -32,6 +62,8 @@ class USdatasetOmni(Dataset):
         self_norm=False,
         include_testicles=False,
         testicle_split="",
+        self_id = False,
+        num_clusters = 10
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -41,6 +73,8 @@ class USdatasetOmni(Dataset):
         self.ccl_crop = ccl_crop
         self.keep_aspect_ratio = keep_aspect_ratio
         self.self_norm = self_norm
+        self.self_id = self_id
+        self.num_clusters = num_clusters
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
@@ -100,7 +134,6 @@ class USdatasetOmni(Dataset):
                     continue
                 elif "Testicle" in dataset_dir.name and include_testicles:
                     list_path = Path(dataset_dir, split + f"{testicle_split}.txt")
-                    print(list_path)
                 else:
                     list_path = Path(dataset_dir, split + ".txt")
                 self.dataset_list.append(dataset_dir.name)
@@ -175,8 +208,55 @@ class USdatasetOmni(Dataset):
                     ):
                         self.items.append(item)
 
+        if self.self_id:
+            self.__init_self_ids__()
         # self.items = self.items[:10]
 
+    def __init_self_ids__(self, batch_size=32, num_workers=16):
+        pretrained_model_name = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+        processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
+        model_fe = AutoModel.from_pretrained(
+            pretrained_model_name, 
+            device_map="auto", 
+        )
+        model_fe.eval()
+        
+        # Create dataset and dataloader
+        dataset = ImageDataset(self.items, processor)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=6,
+            collate_fn=collate_fn,
+            prefetch_factor = 6,
+            pin_memory=True if torch.cuda.is_available() else False
+        )
+        
+        print("Computing dino embeddings")
+        with torch.inference_mode():
+            for inputs, indices in tqdm(dataloader, total=len(dataloader)):
+                inputs = {k: v.to(model_fe.device) for k, v in inputs.items()}
+                outputs = model_fe(**inputs)
+                
+                pooled_output = outputs.pooler_output.cpu()
+                
+                # Assign embeddings back to items
+                for idx, embedding in zip(indices, pooled_output):
+                    self.items[idx]['self_id'] = embedding
+
+        print("Applying KNN clustering")
+        embeddings = np.stack([item['self_id'].numpy() for item in self.items])
+        
+        print(f"Applying KMeans clustering with {self.num_clusters} clusters")
+        kmeans = KMeans(n_clusters=self.num_clusters, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(embeddings)
+            
+        for i, item in enumerate(self.items):
+            item['cluster_id'] = cluster_labels[i]
+            item['cluster_center_distance'] = np.linalg.norm(
+                embeddings[i] - kmeans.cluster_centers_[cluster_labels[i]]
+            )
+                
     def __len__(self):
         return len(self.items)
 
@@ -258,10 +338,11 @@ class USdatasetOmni(Dataset):
             "pixel_values": image.to(
                 torch.float
             ),  # Standard input key for vision models
-            "organ_id": label_id,  # Standard target key for the Trainer
+            "organ_id": item['cluster_id'].item() if self.self_id else label_id,  # Standard target key for the Trainer
             "labels": item["multi_cls_label"],  # Custom key for your model
             "masks": mask.to(torch.float).squeeze(),  # Standard key for mask/attention
             "bbox_coords": unormalized_bbox_coords,  # Custom key for your model
+            "organ_id_metric": label_id,  # Custom key for your model
             # "image_path": item["image_path"],  # Custom key, but see note on removal
         }
 
@@ -274,6 +355,7 @@ class USdatasetOmni(Dataset):
         Returns:
             Normalized tensor with mean≈0, std≈1 for non-black pixels
         """
+
         if tensor.dim() == 2:
             mask = tensor > 0
         elif tensor.dim() == 3:

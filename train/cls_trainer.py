@@ -15,6 +15,7 @@ from utils.utils import (
 )
 from utils.stratified_splits import build_train_val_datasets
 from transformers import TrainerCallback, TrainerState, TrainerControl
+from torch.utils.data import Subset, ConcatDataset
 
 
 def get_sft_transforms(train: bool):
@@ -121,7 +122,20 @@ class FreezeBackboneCallback(TrainerCallback):
 
 def train(args: Namespace):
     if args.onpublic:
-        train_dataset, val_dataset = build_train_val_datasets(DATA_DIR, args, seed=42)
+        train_dataset, val_dataset = build_train_val_datasets(DATA_DIR, args, seed=42, get_sft_transforms_ = get_sft_transforms)
+
+        train_syn_dataset = USdatasetOmni(
+            "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+            "train",
+            transforms=get_sft_transforms(train=True),
+            data_type=args.dataset_type,
+            out_size=args.dataset_size,
+            ccl_crop=args.use_ccl_crop,
+            keep_aspect_ratio=args.keep_aspect_ratio,
+            include_testicles=True,
+        )
+        print(f"Synthetic dataset initialized with {len(train_syn_dataset.items)} images")
+        train_dataset = ConcatDataset([train_dataset, train_syn_dataset])
 
         test_dataset = USdatasetOmni(
             DATA_DIR,
@@ -131,6 +145,7 @@ def train(args: Namespace):
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
+            include_testicles=True
         )
     else:
         train_dataset = USdatasetOmni(

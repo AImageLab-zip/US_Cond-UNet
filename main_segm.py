@@ -24,15 +24,13 @@ def parse_args():
     parser.add_argument(
         "--wandb-run-name", type=str, default=None, help="Weights & Biases run name."
     )
+    
+    parser.add_argument(
+        "--wandb-run-id", type=str, default=None, help="Weights & Biases run id in case you want to resume."
+    )
     # -----------------------------------------------
     # |               DATASET Config                |
     # -----------------------------------------------
-    parser.add_argument(
-        "--dataset-path",
-        type=str,
-        default=None,
-        help="dataset path",
-    )
     parser.add_argument(
         "--dataset-type",
         type=str,
@@ -65,6 +63,16 @@ def parse_args():
         "--testicle-split",
         type=str,
         default="",
+    )    
+    parser.add_argument(
+        "--self-id",
+        type=int,
+        default=0,
+    )    
+    parser.add_argument(
+        "--num-clusters",
+        type=int,
+        default=10,
     )
     # -----------------------------------------------
     # |                 SEGM Config                 |
@@ -97,7 +105,23 @@ def parse_args():
         "--freeze-image-encoder",
         type=int,
         default=1,
+    )    
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default=None,
+    )    
+    parser.add_argument(
+        "--film-embed",
+        type=int,
+        default=64,
+    )    
+    parser.add_argument(
+        "--film-autoembed",
+        type=bool,
+        default=1,
     )
+    
     # -----------------------------------------------
     # |         Optim & Scheduler Config            |
     # -----------------------------------------------

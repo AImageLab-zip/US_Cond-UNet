@@ -135,10 +135,12 @@ class FiLM2d(nn.Module):
         self,
         n_organs: int,
         in_channels: int,
-        emb_dim: int = 64,
+        emb_dim: int | None = None,
         hidden: int | None = None,
+        autoembed: bool = True,
     ):
         super().__init__()
+        self.autoembed = autoembed
         hidden = hidden or 2 * in_channels
         self.embed = nn.Embedding(n_organs, emb_dim)
 
@@ -158,7 +160,10 @@ class FiLM2d(nn.Module):
         x : (B, C, H, W)
         organ_id : (B,) integer 0…n_organs-1
         """
-        beta_gamma = self.mlp(self.embed(organ_id))  # (B, 2C)
+        if self.autoembed:
+            beta_gamma = self.mlp(self.embed(organ_id))  # (B, 2C)
+        else:
+            beta_gamma = self.mlp(organ_id)
         beta, gamma = beta_gamma.chunk(2, dim=-1)  # each (B, C)
         beta = beta.unsqueeze(-1).unsqueeze(-1)
         gamma = gamma.unsqueeze(-1).unsqueeze(-1)
@@ -178,6 +183,7 @@ class DownConvBlockFiLM(nn.Module):
         n_organs: int,
         conv_kwargs={"kernel_size": 3, "stride": 1, "padding": 1},
         emb_dim: int = 64,
+        film_autoembed = True,
     ):
         super().__init__()
         assert len(in_channels) == len(
@@ -193,7 +199,7 @@ class DownConvBlockFiLM(nn.Module):
 
         self.film_blocks = nn.ModuleList(
             [
-                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim)
+                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim, autoembed = film_autoembed)
                 for out_ch in out_channels
             ]
         )
@@ -226,6 +232,7 @@ class UpConvBlockFiLM(nn.Module):
         conv_kwargs: dict = {"kernel_size": 3, "stride": 1, "padding": 1},
         upconv_kwargs: dict = {"kernel_size": 2, "stride": 2},
         emb_dim: int = 64,
+        film_autoembed = True,
     ):
         super().__init__()
         assert len(in_channels) == len(
@@ -241,7 +248,7 @@ class UpConvBlockFiLM(nn.Module):
 
         self.film_blocks = nn.ModuleList(
             [
-                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim)
+                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim, autoembed = film_autoembed)
                 for out_ch in out_channels
             ]
         )
@@ -277,6 +284,8 @@ class UNet2DFiLM(nn.Module):
         depth=3,
         film_start: int = 0,
         use_film=True,
+        film_embed=64,
+        film_autoembed = True
     ):
         """
         UNet with symmetric FiLM conditioning in encoder and decoder.
@@ -300,6 +309,9 @@ class UNet2DFiLM(nn.Module):
         self.depth = depth
         self.film_start = max(0, int(film_start))
         self.use_film = use_film
+        self.n_organs = n_organs
+        self.film_embed = film_embed
+        self.film_autoembed = film_autoembed
         self.criterion = DiceBCELoss()
 
         # ---------------- Encoder ----------------
@@ -310,7 +322,9 @@ class UNet2DFiLM(nn.Module):
             self.encoder["0"] = DownConvBlockFiLM(
                 [self.in_channels, self.size],
                 [self.size, self.size * 2],
-                n_organs=n_organs,
+                n_organs=self.n_organs,
+                emb_dim=self.film_embed,
+                film_autoembed = self.film_autoembed,
             )
         else:
             self.encoder["0"] = DownConvBlock(
@@ -323,8 +337,8 @@ class UNet2DFiLM(nn.Module):
             out_ch = [self.size * (2**i), self.size * (2 ** (i + 1))]
             key = str(i)
 
-            if self.use_film and i >= self.film_start:
-                self.encoder[key] = DownConvBlockFiLM(in_ch, out_ch, n_organs=n_organs)
+            if self.use_film and i >= self.film_start:                
+                self.encoder[key] = DownConvBlockFiLM(in_ch, out_ch, n_organs=n_organs, emb_dim=self.film_embed, film_autoembed = self.film_autoembed)
             else:
                 self.encoder[key] = DownConvBlock(in_ch, out_ch)
 
@@ -334,6 +348,8 @@ class UNet2DFiLM(nn.Module):
                 [self.size * (2**self.depth), self.size * (2**self.depth)],
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
                 n_organs=n_organs,
+                emb_dim=self.film_embed,
+                film_autoembed = self.film_autoembed
             )
         else:
             self.bottleneck = UpConvBlock(
@@ -357,6 +373,8 @@ class UNet2DFiLM(nn.Module):
                     ],
                     [self.size * (2**i), self.size * (2**i)],
                     n_organs=n_organs,
+                    emb_dim=self.film_embed,
+                    film_autoembed = self.film_autoembed
                 )
             else:
                 self.decoder[str(i - 1)] = UpConvBlock(
@@ -374,6 +392,8 @@ class UNet2DFiLM(nn.Module):
                 [self.size * 2, self.size * 2],
                 n_organs=n_organs,
                 up_conv=False,
+                emb_dim=self.film_embed,
+                film_autoembed = self.film_autoembed
             )
         else:
             self.decoder["0"] = UpConvBlock(
@@ -459,7 +479,7 @@ class UNet2DFiLM(nn.Module):
         return out
 
     def forward(
-        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None
+        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None, organ_id_metric=None
     ):
         """
         Full forward pass through the network.
@@ -515,7 +535,7 @@ class UNet2DFiLM(nn.Module):
         else:
             loss = 0.0
 
-        return {"loss": loss, "logits": out, "labels": masks, "organ_id": organ_id}
+        return {"loss": loss, "logits": out, "labels": masks, "organ_id": organ_id, "organ_id_metric": organ_id_metric}
 
     def __str__(self):
         model_parameters = filter(lambda p: p.requires_grad, self.parameters())

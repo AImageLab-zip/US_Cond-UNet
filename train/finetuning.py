@@ -11,8 +11,8 @@ from nets.cls_net import OmniClsCBAM
 from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
 from utils.utils import (
     organ_to_class_dict,
-    class_to_organ_dict,
     multi_cls_labels_dict,
+    class_to_organ_dict,
     get_sft_transforms,
     compute_dsc,
     compute_nsd,
@@ -21,56 +21,6 @@ from utils.utils import (
 import numpy as np
 from utils.paths import *
 from copy import deepcopy
-from pathlib import Path
-
-
-def load_film_checkpoint(model: torch.nn.Module, checkpoint_path: str):
-    """
-    Load a pretrained FiLM UNet checkpoint while allowing the FiLM embeddings
-    to grow when the current model declares more organs.
-
-    This copies weights that match exactly and, for FiLM embeddings whose first
-    dimension encodes organs, it copies the original rows and keeps the newly
-    initialised rows untouched so they can learn the new organs.
-    """
-    pretrained_state = load_file(checkpoint_path)
-    current_state = model.state_dict()
-    expanded = []
-    copied = []
-    skipped = []
-
-    for key, current_tensor in current_state.items():
-        if key not in pretrained_state:
-            continue
-
-        pretrained_tensor = pretrained_state[key]
-        if pretrained_tensor.shape == current_tensor.shape:
-            current_state[key] = pretrained_tensor
-            copied.append(key)
-            continue
-
-        same_rank = pretrained_tensor.ndim == current_tensor.ndim
-        same_trailing_shape = pretrained_tensor.shape[1:] == current_tensor.shape[1:]
-        grows_first_dim = pretrained_tensor.shape[0] <= current_tensor.shape[0]
-
-        if same_rank and same_trailing_shape and grows_first_dim:
-            # Keep randomly initialised rows for the new organs, copy the old ones
-            updated_tensor = current_tensor.clone()
-            updated_tensor[: pretrained_tensor.shape[0]] = pretrained_tensor
-            current_state[key] = updated_tensor
-            expanded.append(key)
-        else:
-            skipped.append(key)
-
-    load_result = model.load_state_dict(current_state, strict=False)
-    print(
-        f"Loaded {checkpoint_path} → copied={len(copied)} expanded={len(expanded)} skipped={len(skipped)}"
-    )
-    if expanded:
-        print("Expanded FiLM embeddings for:", expanded)
-    if skipped:
-        print("Skipped keys due to incompatible shape:", skipped)
-    return load_result
 
 
 def compute_metrics(eval_pred):
@@ -176,15 +126,9 @@ def mask_overlap_visualization(pred: torch.Tensor, mask: torch.Tensor):
 
 
 def train(args: Namespace):
-    train_txt_paths = list(Path(args.dataset_path).rglob("train.txt"))
-    val_txt_paths = list(Path(args.dataset_path).rglob("val.txt"))
-    val_cls_txt_paths = list(Path(args.dataset_path).rglob("val_cls.txt"))  
-    if len(train_txt_paths) == 0 or len(val_txt_paths) == 0 or len(val_cls_txt_paths) == 0: 
-        print(f"No train/val/val_cls.txt files found in {args.dataset_path}. Exiting...")
-        return
 
     train_dataset = USdatasetOmni(
-        args.dataset_path,
+        DATA_DIR,
         "train",
         transforms=get_sft_transforms(train=True),
         data_type=args.dataset_type,
@@ -193,10 +137,9 @@ def train(args: Namespace):
         keep_aspect_ratio=args.keep_aspect_ratio,
         self_norm=args.self_norm,
         include_testicles=True,
-        testicle_split=args.testicle_split,
     )
     val_dataset = USdatasetOmni(
-        args.dataset_path,
+        DATA_DIR,
         "val",
         transforms=get_sft_transforms(train=False),
         data_type=args.dataset_type,
@@ -205,11 +148,10 @@ def train(args: Namespace):
         keep_aspect_ratio=args.keep_aspect_ratio,
         self_norm=args.self_norm,
         include_testicles=True,
-        testicle_split=args.testicle_split,
     )
     test_dataset = USdatasetOmni(
-        args.dataset_path,
-        "val_cls",
+        DATA_DIR,
+        "test",
         transforms=get_sft_transforms(train=False),
         data_type=args.dataset_type,
         out_size=args.dataset_size,
@@ -217,7 +159,6 @@ def train(args: Namespace):
         keep_aspect_ratio=args.keep_aspect_ratio,
         self_norm=args.self_norm,
         include_testicles=True,
-        testicle_split=args.testicle_split,
     )
     print(
         f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}, Test dataset size: {len(test_dataset)}"
@@ -228,57 +169,24 @@ def train(args: Namespace):
         project=args.wandb_project,
         name=args.wandb_run_name,
         config=args,
+        id = args.wandb_run_id,
+        resume = True if args.wandb_run_id is not None else False
     )
-    if args.use_medsam:
-        from segment_anything import sam_model_registry
 
-        sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-
-        model = MedSAM(
-            image_encoder=deepcopy(sam_model.image_encoder),
-            mask_decoder=deepcopy(sam_model.mask_decoder),
-            prompt_encoder=deepcopy(sam_model.prompt_encoder),
-            predict_bboxes=True,
-            freeze_image_encoder=args.freeze_image_encoder,
-        )
-        state_dict = load_file(MEDSAM_UNFREEZED_CHECKPOINT)
-        model.load_state_dict(state_dict)
-        load_result = model.load_state_dict(state_dict)
-        print(load_result)
-
-    elif args.use_medsam_prompt:
-        from segment_anything import sam_model_registry
-
-        sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-
-        model = MedSAMPrompt(
-            image_encoder=deepcopy(sam_model.image_encoder),
-            mask_decoder=deepcopy(sam_model.mask_decoder),
-            prompt_encoder=deepcopy(sam_model.prompt_encoder),
-            predict_bboxes=True,
-            freeze_image_encoder=args.freeze_image_encoder,
-        )
-        state_dict = load_file(MEDSAM_PROMPT_CHECKPOINT)
-        model.load_state_dict(state_dict)
-        load_result = model.load_state_dict(state_dict)
-        print(load_result)
-    else:
-        model = UNet2DFiLM(
-            in_channels=3,
-            num_classes=1,
-            n_organs=len(organ_to_class_dict),
-            size=32,
-            depth=args.unet_depth,
-            film_start=args.film_start,
-        )
-        if args.unet_depth == 5:
-            load_result = load_film_checkpoint(model, FILMUNET5_CHECKPOINT)
-            print(load_result)
-        elif args.unet_depth == 4:
-            load_result = load_film_checkpoint(model, FILMUNET4_CHECKPOINT)
-            print(load_result)
-        else:
-            print("No checkpoint loaded!!!!!!!!!")
+    model = UNet2DFiLM(
+        in_channels=3,
+        num_classes=1,
+        n_organs=len(organ_to_class_dict),
+        size=32,
+        depth=args.unet_depth,
+        film_start=args.film_start,
+    )
+    state_dict = load_file(
+        args.checkpoint_path
+    )
+    model.load_state_dict(state_dict)
+    load_result = model.load_state_dict(state_dict)
+    print(load_result)
 
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)

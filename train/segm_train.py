@@ -16,17 +16,20 @@ from peft import LoraConfig, get_peft_model, TaskType
 from utils.utils import (
     get_sft_transforms,
     compute_dsc,
-    compute_nsd,
     class_to_organ_dict,
+    compute_nsd,
     mask_overlap_visualization,
 )
 from utils.stratified_splits import build_train_val_datasets
 from utils.paths import *
+from torch.utils.data import Subset, ConcatDataset
 
 
 def compute_metrics(eval_pred):
     logits, _ = eval_pred
-    logits, masks, organ_ids = logits  # logits/masks shape B, 512, 512
+    # logits, masks, organ_ids = logits  # logits/masks shape B, 512, 512
+    logits, masks, organ_ids, organ_id_metric = logits  # logits/masks shape B, 512, 512
+
     logits = v2.functional.resize(
         torch.from_numpy(logits),
         (masks.shape[-1], masks.shape[-1]),
@@ -57,7 +60,7 @@ def compute_metrics(eval_pred):
 
     organ_stats = defaultdict(lambda: {"dsc": [], "nsd": []})
     gt_np = masks
-    for i, organ in enumerate(organ_ids):
+    for i, organ in enumerate(organ_id_metric):
         dsc = compute_dsc(gt_np[i], pred_np[i])
         nsd = compute_nsd(gt_np[i], pred_np[i], tolerance=1)
         organ = class_to_organ_dict[organ]
@@ -85,8 +88,21 @@ def train(args: Namespace):
     if args.onpublic:
         print("Loading public for train, private for test!")
         train_dataset, val_dataset = build_train_val_datasets(
-            DATA_DIR, args, seed=args.seed
+            DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
         )
+
+        # train_syn_dataset = USdatasetOmni(
+        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     "train",
+        #     transforms=get_sft_transforms(train=True),
+        #     data_type=args.dataset_type,
+        #     out_size=args.dataset_size,
+        #     ccl_crop=args.use_ccl_crop,
+        #     keep_aspect_ratio=args.keep_aspect_ratio,
+        #     include_testicles=True,
+        # )
+        # print(f"Synthetic dataset initialized with {len(train_syn_dataset.items)} images")
+        # train_dataset = ConcatDataset([train_dataset, train_syn_dataset])
 
         test_dataset = USdatasetOmni(
             DATA_DIR,
@@ -97,6 +113,8 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             include_testicles=True,
+            self_id = args.self_id,
+            num_clusters = args.num_clusters,
         )
     else:
         train_dataset = USdatasetOmni(
@@ -108,7 +126,27 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
+            include_testicles=True,
+            self_id = args.self_id,
+            num_clusters = args.num_clusters,
         )
+        # train_syn_dataset = USdatasetOmni(
+        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     "train",
+        #     transforms=get_sft_transforms(train=True),
+        #     data_type=args.dataset_type,
+        #     out_size=args.dataset_size,
+        #     ccl_crop=args.use_ccl_crop,
+        #     keep_aspect_ratio=args.keep_aspect_ratio,
+        #     include_testicles=True,
+        #     self_id = args.self_id,
+        #     num_clusters = args.num_clusters,
+        # )
+        # print(
+        #     f"Synthetic dataset initialized with {len(train_syn_dataset.items)} images"
+        # )
+        # train_dataset = ConcatDataset([train_dataset, train_syn_dataset])
+
         val_dataset = USdatasetOmni(
             DATA_DIR,
             "val",
@@ -118,7 +156,16 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
+            include_testicles=True,
+            self_id = args.self_id,
+            num_clusters = args.num_clusters,
         )
+        # train_dataset, val_dataset = build_train_val_datasets(
+        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     args,
+        #     seed=args.seed,
+        #     id_file_name="train",
+        # )
         test_dataset = USdatasetOmni(
             DATA_DIR,
             "test",
@@ -128,6 +175,9 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
+            include_testicles=True,
+            self_id = bool(args.self_id),
+            num_clusters = args.num_clusters,
         )
 
     print(
@@ -139,9 +189,11 @@ def train(args: Namespace):
         project=args.wandb_project,
         name=args.wandb_run_name,
         config=args,
+        # resume = True,
+        # id = '9bv2or43'
     )
     if args.use_medsam:
-        from MedSAM.segment_anything import sam_model_registry
+        from segment_anything import sam_model_registry
 
         sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
 
@@ -154,7 +206,7 @@ def train(args: Namespace):
         )
 
     elif args.use_medsam_prompt:
-        from MedSAM.segment_anything import sam_model_registry
+        from segment_anything import sam_model_registry
 
         sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
         print(sum([p.numel() for p in sam_model.parameters()]))
@@ -170,25 +222,60 @@ def train(args: Namespace):
         model = UNet2DFiLM(
             in_channels=3,
             num_classes=1,
-            n_organs=len(organ_to_class_dict),
+            n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict) ,
             size=32,
             depth=args.unet_depth,
             film_start=args.film_start,
             use_film=args.use_film,
+            film_embed=args.film_embed,
+            film_autoembed = bool(args.film_autoembed)
         )
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
     output_dir = f"{run_hash}"
     print(f"Saving results to: {output_dir}")
+    # for epochs
+    # training_args = TrainingArguments(
+    #     output_dir=output_dir,
+    #     num_train_epochs=args.epochs,
+    #     per_device_train_batch_size=args.batch_size,
+    #     per_device_eval_batch_size=args.batch_size,
+    #     logging_dir="./logs",
+    #     seed=args.seed,
+    #     save_strategy="epoch",
+    #     eval_strategy="epoch",
+    #     load_best_model_at_end=True,
+    #     metric_for_best_model="eval_loss",
+    #     save_total_limit=2,
+    #     report_to=["wandb"] if args.wandb_project else None,
+    #     run_name=args.wandb_run_name,
+    #     dataloader_num_workers=args.num_workers,
+    #     logging_steps=10,
+    #     log_level="info",
+    #     eval_accumulation_steps=int(args.epochs),
+    #     optim=args.optim,
+    #     learning_rate=args.learning_rate,
+    #     weight_decay=args.weight_decay,
+    #     lr_scheduler_type=args.lr_scheduler_type,
+    #     warmup_ratio=args.warmup_ratio,
+    #     max_grad_norm=1.0,
+    #     gradient_accumulation_steps=args.acc_grad,
+    #     # fp16=True,
+    #     # push_to_hub=False,
+    # )
+    # for steps
     training_args = TrainingArguments(
         output_dir=output_dir,
-        num_train_epochs=args.epochs,
+        # num_train_epochs=args.epochs,
+        max_steps=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         logging_dir="./logs",
         seed=args.seed,
-        save_strategy="epoch",
-        eval_strategy="epoch",
+        save_strategy="steps",
+        eval_strategy="steps",
+        save_steps=int(args.epochs / 100),
+        eval_steps=int(args.epochs / 100),
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         save_total_limit=2,
@@ -197,7 +284,7 @@ def train(args: Namespace):
         dataloader_num_workers=args.num_workers,
         logging_steps=10,
         log_level="info",
-        eval_accumulation_steps=int(args.epochs),
+        eval_accumulation_steps=100,
         optim=args.optim,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
