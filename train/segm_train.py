@@ -91,7 +91,7 @@ def train(args: Namespace):
         train_dataset, val_dataset = build_train_val_datasets(
             DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
         )
-
+        kmean_model = train_dataset.dataset.get_kmeans_model()
         # train_syn_dataset = USdatasetOmni(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
@@ -116,7 +116,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             num_clusters = args.num_clusters,
-            kmeans_model = train_dataset.get_kmeans_model(),
+            kmeans_model = kmean_model,
         )
     else:
         train_dataset = USdatasetOmni(
@@ -132,6 +132,8 @@ def train(args: Namespace):
             self_id = args.self_id,
             num_clusters = args.num_clusters,
         )
+        kmean_model = train_dataset.get_kmeans_model()
+
         # train_syn_dataset = USdatasetOmni(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
@@ -161,7 +163,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             num_clusters = args.num_clusters,
-            kmeans_model = train_dataset.get_kmeans_model(),
+            kmeans_model = kmean_model,
         )
         # train_dataset, val_dataset = build_train_val_datasets(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -181,7 +183,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = bool(args.self_id),
             num_clusters = args.num_clusters,
-            kmeans_model = train_dataset.get_kmeans_model(),
+            kmeans_model = kmean_model,
         )
 
     print(
@@ -237,11 +239,12 @@ def train(args: Namespace):
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
     output_dir = f"{run_hash}"
-    if train_dataset.kmeans_model is not None:
+    if kmean_model is not None:
         filepath = Path(f"{run_hash}/kmeans_model.pkl")
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, 'wb') as f:
-            pickle.dump(train_dataset.kmeans_model, f)
+            pickle.dump(kmean_model, f)
+
         print(f"KMeans model saved to {filepath}")
     print(f"Saving results to: {output_dir}")
     # for epochs
