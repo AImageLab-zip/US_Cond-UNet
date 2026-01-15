@@ -23,6 +23,7 @@ from tqdm import tqdm
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
+import pickle
 
 class ImageDataset(Dataset):
     def __init__(self, items, processor):
@@ -62,8 +63,9 @@ class USdatasetOmni(Dataset):
         self_norm=False,
         include_testicles=False,
         testicle_split="",
-        self_id = False,
-        num_clusters = 10
+        self_id=False,
+        num_clusters=10,
+        kmeans_model=None,  # NEW: Pass trained KMeans model from training dataset
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -75,6 +77,7 @@ class USdatasetOmni(Dataset):
         self.self_norm = self_norm
         self.self_id = self_id
         self.num_clusters = num_clusters
+        self.kmeans_model = kmeans_model  # NEW: Store the passed model
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
@@ -113,8 +116,8 @@ class USdatasetOmni(Dataset):
                 "Testis",
                 "testis",
                 "Testes",
-            ],  # plural and singular
-            # 8: breast_luminal (a specific subtype, often in oncology)
+            ],
+            # 8: breast_luminal
             8: [
                 "Breast Luminal",
                 "breast luminal",
@@ -144,7 +147,6 @@ class USdatasetOmni(Dataset):
                         for line in f.readlines()
                     ]
 
-                    # files = set(files)
                     self.sample_list.extend(files)
                     self.sample_by_organ[
                         dataset_to_organ_dict[dataset_dir.name]
@@ -210,7 +212,6 @@ class USdatasetOmni(Dataset):
 
         if self.self_id:
             self.__init_self_ids__()
-        # self.items = self.items[:10]
 
     def __init_self_ids__(self, batch_size=32, num_workers=16):
         pretrained_model_name = "facebook/dinov3-vitl16-pretrain-lvd1689m"
@@ -228,7 +229,7 @@ class USdatasetOmni(Dataset):
             batch_size=batch_size,
             num_workers=6,
             collate_fn=collate_fn,
-            prefetch_factor = 6,
+            prefetch_factor=6,
             pin_memory=True if torch.cuda.is_available() else False
         )
         
@@ -244,18 +245,32 @@ class USdatasetOmni(Dataset):
                 for idx, embedding in zip(indices, pooled_output):
                     self.items[idx]['self_id'] = embedding
 
-        print("Applying KNN clustering")
         embeddings = np.stack([item['self_id'].numpy() for item in self.items])
         
-        print(f"Applying KMeans clustering with {self.num_clusters} clusters")
-        kmeans = KMeans(n_clusters=self.num_clusters, random_state=42, n_init=10)
-        cluster_labels = kmeans.fit_predict(embeddings)
+        # NEW: Check if we have a pre-trained model to use
+        if self.kmeans_model is not None:
+            print(f"Using pre-trained KMeans model with {self.num_clusters} clusters")
+            cluster_labels = self.kmeans_model.predict(embeddings)
+        else:
+            print(f"Training new KMeans model with {self.num_clusters} clusters")
+            self.kmeans_model = KMeans(n_clusters=self.num_clusters, random_state=42, n_init=10)
+            cluster_labels = self.kmeans_model.fit_predict(embeddings)
             
         for i, item in enumerate(self.items):
             item['cluster_id'] = cluster_labels[i]
             item['cluster_center_distance'] = np.linalg.norm(
-                embeddings[i] - kmeans.cluster_centers_[cluster_labels[i]]
+                embeddings[i] - self.kmeans_model.cluster_centers_[cluster_labels[i]]
             )
+    
+    def get_kmeans_model(self):
+        """
+        Returns the trained KMeans model.
+        Use this to pass the model from training dataset to test dataset.
+        
+        Returns:
+            KMeans model or None if not initialized
+        """
+        return self.kmeans_model
                 
     def __len__(self):
         return len(self.items)
@@ -287,7 +302,7 @@ class USdatasetOmni(Dataset):
             mask = pil_to_tensor(Image.open(item["mask_path"]).convert("L"))
             bbox_t = tv_tensors.BoundingBoxes(
                 bbox_coords,
-                format="XYXY",  # bounding box represented via corners; x1, y1 being top left; x2, y2 being bottom right.
+                format="XYXY",
                 canvas_size=image.shape[-2:],
             )
             image, unormalized_bbox_coords = resize_pad(
@@ -335,15 +350,12 @@ class USdatasetOmni(Dataset):
             ).unsqueeze(0)
         label_id = organ_to_class_dict[item["organ_label"]]
         return {
-            "pixel_values": image.to(
-                torch.float
-            ),  # Standard input key for vision models
-            "organ_id": item['cluster_id'].item() if self.self_id else label_id,  # Standard target key for the Trainer
-            "labels": item["multi_cls_label"],  # Custom key for your model
-            "masks": mask.to(torch.float).squeeze(),  # Standard key for mask/attention
-            "bbox_coords": unormalized_bbox_coords,  # Custom key for your model
-            "organ_id_metric": label_id,  # Custom key for your model
-            # "image_path": item["image_path"],  # Custom key, but see note on removal
+            "pixel_values": image.to(torch.float),
+            "organ_id": item['cluster_id'].item() if self.self_id else label_id,
+            "labels": item["multi_cls_label"],
+            "masks": mask.to(torch.float).squeeze(),
+            "bbox_coords": unormalized_bbox_coords,
+            "organ_id_metric": label_id,
         }
 
     def normalize_tensor_zscore_ignore_black(

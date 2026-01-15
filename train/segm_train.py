@@ -12,7 +12,6 @@ from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
 from utils.paths import DATA_DIR
 from utils.utils import organ_to_class_dict, multi_cls_labels_dict, generate_run_hash
 import numpy as np
-from peft import LoraConfig, get_peft_model, TaskType
 from utils.utils import (
     get_sft_transforms,
     compute_dsc,
@@ -23,6 +22,8 @@ from utils.utils import (
 from utils.stratified_splits import build_train_val_datasets
 from utils.paths import *
 from torch.utils.data import Subset, ConcatDataset
+from pathlib import Path
+import pickle
 
 
 def compute_metrics(eval_pred):
@@ -115,6 +116,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             num_clusters = args.num_clusters,
+            kmeans_model = train_dataset.get_kmeans_model(),
         )
     else:
         train_dataset = USdatasetOmni(
@@ -159,6 +161,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             num_clusters = args.num_clusters,
+            kmeans_model = train_dataset.get_kmeans_model(),
         )
         # train_dataset, val_dataset = build_train_val_datasets(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -178,6 +181,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = bool(args.self_id),
             num_clusters = args.num_clusters,
+            kmeans_model = train_dataset.get_kmeans_model(),
         )
 
     print(
@@ -233,6 +237,12 @@ def train(args: Namespace):
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
     output_dir = f"{run_hash}"
+    if train_dataset.kmeans_model is not None:
+        filepath = Path(f"{run_hash}/kmeans_model.pkl")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, 'wb') as f:
+            pickle.dump(train_dataset.kmeans_model, f)
+        print(f"KMeans model saved to {filepath}")
     print(f"Saving results to: {output_dir}")
     # for epochs
     # training_args = TrainingArguments(
