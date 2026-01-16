@@ -68,6 +68,7 @@ def build_train_val_datasets(
         include_testicles=False,
         self_id = args.self_id,
         use_cluster_id = args.use_cluster_id,
+        enc_type = args.enc_type,
         num_clusters = args.num_clusters,
     )
 

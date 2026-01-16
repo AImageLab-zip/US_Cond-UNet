@@ -75,6 +75,11 @@ def parse_args():
         default=1,
     )   
     parser.add_argument(
+        "--enc-type",
+        type=str,
+        default="dino",
+    )  
+    parser.add_argument(
         "--num-clusters",
         type=int,
         default=10,

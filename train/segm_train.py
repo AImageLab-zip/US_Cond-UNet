@@ -116,6 +116,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             use_cluster_id = args.use_cluster_id,
+            enc_type = args.enc_type,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )
@@ -131,6 +132,7 @@ def train(args: Namespace):
             self_norm=args.self_norm,
             include_testicles=True,
             self_id = args.self_id,
+            enc_type = args.enc_type,
             use_cluster_id = args.use_cluster_id,
             num_clusters = args.num_clusters,
         )
@@ -165,6 +167,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = args.self_id,
             use_cluster_id = args.use_cluster_id,
+            enc_type = args.enc_type,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )
@@ -186,6 +189,7 @@ def train(args: Namespace):
             include_testicles=True,
             self_id = bool(args.self_id),
             use_cluster_id = args.use_cluster_id,
+            enc_type = args.enc_type,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )

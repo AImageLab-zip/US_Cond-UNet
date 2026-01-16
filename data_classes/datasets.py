@@ -17,13 +17,14 @@ from utils.utils import (
 )
 from PIL import Image
 from torchvision.transforms.v2.functional import pil_to_tensor, center_crop
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoImageProcessor, AutoModel, CLIPVisionModel
 from transformers.image_utils import load_image
 from tqdm import tqdm 
 from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
 import pickle
+from typing import Literal, Optional, Union
 
 class ImageDataset(Dataset):
     def __init__(self, items, processor):
@@ -66,7 +67,8 @@ class USdatasetOmni(Dataset):
         self_id=False,
         use_cluster_id = True,
         num_clusters=10,
-        kmeans_model=None, 
+        kmeans_model=None,
+        enc_type: Literal["dino", "clip"] = "dino",
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -79,7 +81,8 @@ class USdatasetOmni(Dataset):
         self.self_id = self_id
         self.use_cluster_id = use_cluster_id
         self.num_clusters = num_clusters
-        self.kmeans_model = kmeans_model  # NEW: Store the passed model
+        self.kmeans_model = kmeans_model  
+        self.enc_type = enc_type  
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
@@ -216,14 +219,24 @@ class USdatasetOmni(Dataset):
             self.__init_self_ids__()
 
     def __init_self_ids__(self, batch_size=32, num_workers=16):
-        pretrained_model_name = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-        processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
-        model_fe = AutoModel.from_pretrained(
-            pretrained_model_name, 
-            device_map="auto", 
-        )
+        if self.enc_type == "dino":
+            pretrained_model_name = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+            processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
+            model_fe = AutoModel.from_pretrained(
+                pretrained_model_name, 
+                device_map="auto", 
+            )
+            print("Computing dino embeddings")
+        elif self.enc_type == 'clip':
+            pretrained_model_name = "openai/clip-vit-large-patch14"
+            processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
+            model_fe = CLIPVisionModel.from_pretrained(
+                pretrained_model_name,
+                device_map="auto",
+            )
+            print("Computing clip embeddings")
+
         model_fe.eval()
-        
         # Create dataset and dataloader
         dataset = ImageDataset(self.items, processor)
         dataloader = DataLoader(
@@ -235,7 +248,6 @@ class USdatasetOmni(Dataset):
             pin_memory=True if torch.cuda.is_available() else False
         )
         
-        print("Computing dino embeddings")
         with torch.inference_mode():
             for inputs, indices in tqdm(dataloader, total=len(dataloader)):
                 inputs = {k: v.to(model_fe.device) for k, v in inputs.items()}
@@ -249,7 +261,6 @@ class USdatasetOmni(Dataset):
 
         embeddings = np.stack([item['self_id'].numpy() for item in self.items])
         
-        # NEW: Check if we have a pre-trained model to use
         if self.kmeans_model is not None:
             print(f"Using pre-trained KMeans model with {self.num_clusters} clusters")
             cluster_labels = self.kmeans_model.predict(embeddings)
