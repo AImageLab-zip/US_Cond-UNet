@@ -64,8 +64,9 @@ class USdatasetOmni(Dataset):
         include_testicles=False,
         testicle_split="",
         self_id=False,
+        use_cluster_id = True,
         num_clusters=10,
-        kmeans_model=None,  # NEW: Pass trained KMeans model from training dataset
+        kmeans_model=None, 
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -76,6 +77,7 @@ class USdatasetOmni(Dataset):
         self.keep_aspect_ratio = keep_aspect_ratio
         self.self_norm = self_norm
         self.self_id = self_id
+        self.use_cluster_id = use_cluster_id
         self.num_clusters = num_clusters
         self.kmeans_model = kmeans_model  # NEW: Store the passed model
         self.dataset_list = []
@@ -349,9 +351,15 @@ class USdatasetOmni(Dataset):
                 [-100, -100, -100, -100], dtype=torch.float32
             ).unsqueeze(0)
         label_id = organ_to_class_dict[item["organ_label"]]
+        if self.self_id and self.use_cluster_id:
+            organ_id = torch.Tensor([item['cluster_id'].item()]).long()
+        elif self.self_id and not self.use_cluster_id:
+            organ_id = item['self_id']
+        else:
+            organ_id = label_id
         return {
             "pixel_values": image.to(torch.float),
-            "organ_id": item['cluster_id'].item() if self.self_id else label_id,
+            "organ_id": organ_id,
             "labels": item["multi_cls_label"],
             "masks": mask.to(torch.float).squeeze(),
             "bbox_coords": unormalized_bbox_coords,

@@ -67,6 +67,7 @@ def build_train_val_datasets(
         keep_aspect_ratio=args.keep_aspect_ratio,
         include_testicles=False,
         self_id = args.self_id,
+        use_cluster_id = args.use_cluster_id,
         num_clusters = args.num_clusters,
     )
 

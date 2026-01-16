@@ -68,7 +68,12 @@ def parse_args():
         "--self-id",
         type=int,
         default=0,
-    )    
+    )   
+    parser.add_argument(
+        "--use-cluster-id",
+        type=int,
+        default=1,
+    )   
     parser.add_argument(
         "--num-clusters",
         type=int,
@@ -118,7 +123,7 @@ def parse_args():
     )    
     parser.add_argument(
         "--film-autoembed",
-        type=bool,
+        type=int,
         default=1,
     )
     

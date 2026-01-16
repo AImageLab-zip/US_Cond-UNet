@@ -115,6 +115,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             include_testicles=True,
             self_id = args.self_id,
+            use_cluster_id = args.use_cluster_id,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )
@@ -130,6 +131,7 @@ def train(args: Namespace):
             self_norm=args.self_norm,
             include_testicles=True,
             self_id = args.self_id,
+            use_cluster_id = args.use_cluster_id,
             num_clusters = args.num_clusters,
         )
         kmean_model = train_dataset.get_kmeans_model()
@@ -162,6 +164,7 @@ def train(args: Namespace):
             self_norm=args.self_norm,
             include_testicles=True,
             self_id = args.self_id,
+            use_cluster_id = args.use_cluster_id,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )
@@ -182,6 +185,7 @@ def train(args: Namespace):
             self_norm=args.self_norm,
             include_testicles=True,
             self_id = bool(args.self_id),
+            use_cluster_id = args.use_cluster_id,
             num_clusters = args.num_clusters,
             kmeans_model = kmean_model,
         )
