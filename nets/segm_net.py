@@ -430,10 +430,47 @@ class UNet2DFiLM(nn.Module):
             from copy import deepcopy
             from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
             from safetensors.torch import load_file
+            
+            student_channels = 2048 // (2 ** (5 - self.depth))
+            student_spatial = 32 * (2 ** (5 - self.depth))
+            
+            # Target: 256 channels, 64x64 (teacher output)
+            target_channels = 256
+            target_spatial = 64
+            
+            # Calculate upsampling factor
+            spatial_factor = target_spatial // student_spatial
+            
+            if spatial_factor > 1:
+                # Need upsampling
+                self.distill_upconv = nn.ConvTranspose2d(
+                    student_channels, 
+                    target_channels, 
+                    kernel_size=3, 
+                    stride=spatial_factor, 
+                    padding=1, 
+                    output_padding=spatial_factor - 1
+                )
+            elif spatial_factor == 1:
+                # Same spatial size, just adjust channels
+                self.distill_upconv = nn.Conv2d(
+                    student_channels, 
+                    target_channels, 
+                    kernel_size=1
+                )
+            else:
+                # Need downsampling
+                downsample_factor = student_spatial // target_spatial
+                self.distill_upconv = nn.Sequential(
+                    nn.Conv2d(
+                        student_channels, 
+                        target_channels, 
+                        kernel_size=3, 
+                        stride=downsample_factor, 
+                        padding=1
+                    )
+                )
 
-            self.distill_upconv = torch.nn.ConvTranspose2d(
-                2048, 256, 3, 2, padding=1, output_padding=1
-            )
 
             sam_model = sam_model_registry["vit_b"](
                 checkpoint="/media/raid0/US_FiLMUNet/checkpoints/medsam_base/medsam_vit_b.pth"
@@ -627,30 +664,47 @@ class DiceBCELoss(nn.Module):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
-        self.eps = 1e-6
+        self.eps = 1e-7  # Safe for bf16, will be adjusted for fp16
 
     def forward(self, logits: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-
+        # Adjust epsilon based on dtype
+        eps = 1e-4 if logits.dtype == torch.float16 else self.eps
+        
+        # Create mask for valid samples (not all -100)
+        valid_mask = (gt != -100).any(dim=tuple(range(1, gt.dim())))  # [B]
+        
+        # If no valid samples, return zero loss
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+        
+        # Filter out invalid samples
+        logits = logits[valid_mask]
+        gt = gt[valid_mask]
+        
+        # Replace -100 with 0 for any remaining -100 values (partial masks)
+        gt = gt.clone()
+        gt[gt == -100] = 0
         gt = gt.float()
 
+        # BCE loss
         bce = F.binary_cross_entropy_with_logits(
             logits.squeeze(), gt.squeeze(), reduction="mean"
         )
 
         # Soft Dice loss
         probs = torch.sigmoid(logits)
-        dims = tuple(range(2, probs.dim()))  # (H, W)  or (D,H,W)
+        dims = tuple(range(2, probs.dim()))  # (H, W) or (D, H, W)
 
-        # per‑class Dice, per‑sample
+        # per-class Dice, per-sample
         inter = (probs * gt).sum(dims) * 2
         union = probs.sum(dims) + gt.sum(dims)
-        dice = 1 - (inter + self.eps) / (union + self.eps)  # [B, C]
+        dice = 1 - (inter + eps) / (union + eps)  # [B, C]
 
         dice = dice.mean()
 
         loss = self.dice_weight * dice + self.bce_weight * bce
         return loss
-
+    
 
 class MedSAM(nn.Module):
     def __init__(

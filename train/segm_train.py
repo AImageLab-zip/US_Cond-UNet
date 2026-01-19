@@ -208,7 +208,7 @@ def train(args: Namespace):
             name=args.wandb_run_name,
             config=args,
             # resume = True,
-            # id = '9bv2or43'
+            # id = 'f14v3x8n'
         )
     if args.use_medsam:
         from segment_anything import sam_model_registry
@@ -260,35 +260,7 @@ def train(args: Namespace):
 
         print(f"KMeans model saved to {filepath}")
     print(f"Saving results to: {output_dir}")
-    # for epochs
-    # training_args = TrainingArguments(
-    #     output_dir=output_dir,
-    #     num_train_epochs=args.epochs,
-    #     per_device_train_batch_size=args.batch_size,
-    #     per_device_eval_batch_size=args.batch_size,
-    #     logging_dir="./logs",
-    #     seed=args.seed,
-    #     save_strategy="epoch",
-    #     eval_strategy="epoch",
-    #     load_best_model_at_end=True,
-    #     metric_for_best_model="eval_loss",
-    #     save_total_limit=2,
-    #     report_to=["wandb"] if args.wandb_project else None,
-    #     run_name=args.wandb_run_name,
-    #     dataloader_num_workers=args.num_workers,
-    #     logging_steps=10,
-    #     log_level="info",
-    #     eval_accumulation_steps=int(args.epochs),
-    #     optim=args.optim,
-    #     learning_rate=args.learning_rate,
-    #     weight_decay=args.weight_decay,
-    #     lr_scheduler_type=args.lr_scheduler_type,
-    #     warmup_ratio=args.warmup_ratio,
-    #     max_grad_norm=1.0,
-    #     gradient_accumulation_steps=args.acc_grad,
-    #     # fp16=True,
-    #     # push_to_hub=False,
-    # )
+
     # for steps
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -310,6 +282,7 @@ def train(args: Namespace):
         dataloader_num_workers=args.num_workers,
         dataloader_persistent_workers=True,  
         dataloader_pin_memory=True,
+        dataloader_prefetch_factor=20,
         logging_steps=10,
         log_level="info",
         eval_accumulation_steps=100,
