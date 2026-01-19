@@ -69,6 +69,7 @@ class USdatasetOmni(Dataset):
         num_clusters=10,
         kmeans_model=None,
         enc_type: Literal["dino", "clip"] = "dino",
+        id_dropout: float = 0.0,
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -83,6 +84,7 @@ class USdatasetOmni(Dataset):
         self.num_clusters = num_clusters
         self.kmeans_model = kmeans_model  
         self.enc_type = enc_type  
+        self.id_dropout = id_dropout  
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
@@ -368,6 +370,10 @@ class USdatasetOmni(Dataset):
             organ_id = item['self_id']
         else:
             organ_id = label_id
+
+        if self.id_dropout != 0.0 and random.random() < self.id_dropout:
+            organ_id = organ_to_class_dict['unknown']
+        
         return {
             "pixel_values": image.to(torch.float),
             "organ_id": organ_id,

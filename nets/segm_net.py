@@ -2,10 +2,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
-import os, sys
+import os, sys, wandb
 from torchvision.transforms import v2
 from utils.utils import organ_to_class_dict
-
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -183,7 +182,7 @@ class DownConvBlockFiLM(nn.Module):
         n_organs: int,
         conv_kwargs={"kernel_size": 3, "stride": 1, "padding": 1},
         emb_dim: int = 64,
-        film_autoembed = True,
+        film_autoembed=True,
     ):
         super().__init__()
         assert len(in_channels) == len(
@@ -199,7 +198,12 @@ class DownConvBlockFiLM(nn.Module):
 
         self.film_blocks = nn.ModuleList(
             [
-                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim, autoembed = film_autoembed)
+                FiLM2d(
+                    n_organs=n_organs,
+                    in_channels=out_ch,
+                    emb_dim=emb_dim,
+                    autoembed=film_autoembed,
+                )
                 for out_ch in out_channels
             ]
         )
@@ -232,7 +236,7 @@ class UpConvBlockFiLM(nn.Module):
         conv_kwargs: dict = {"kernel_size": 3, "stride": 1, "padding": 1},
         upconv_kwargs: dict = {"kernel_size": 2, "stride": 2},
         emb_dim: int = 64,
-        film_autoembed = True,
+        film_autoembed=True,
     ):
         super().__init__()
         assert len(in_channels) == len(
@@ -248,7 +252,12 @@ class UpConvBlockFiLM(nn.Module):
 
         self.film_blocks = nn.ModuleList(
             [
-                FiLM2d(n_organs=n_organs, in_channels=out_ch, emb_dim=emb_dim, autoembed = film_autoembed)
+                FiLM2d(
+                    n_organs=n_organs,
+                    in_channels=out_ch,
+                    emb_dim=emb_dim,
+                    autoembed=film_autoembed,
+                )
                 for out_ch in out_channels
             ]
         )
@@ -285,7 +294,8 @@ class UNet2DFiLM(nn.Module):
         film_start: int = 0,
         use_film=True,
         film_embed=64,
-        film_autoembed = True
+        film_autoembed=True,
+        distill=False,
     ):
         """
         UNet with symmetric FiLM conditioning in encoder and decoder.
@@ -312,6 +322,7 @@ class UNet2DFiLM(nn.Module):
         self.n_organs = n_organs
         self.film_embed = film_embed
         self.film_autoembed = film_autoembed
+        self.distill = distill
         self.criterion = DiceBCELoss()
 
         # ---------------- Encoder ----------------
@@ -324,7 +335,7 @@ class UNet2DFiLM(nn.Module):
                 [self.size, self.size * 2],
                 n_organs=self.n_organs,
                 emb_dim=self.film_embed,
-                film_autoembed = self.film_autoembed,
+                film_autoembed=self.film_autoembed,
             )
         else:
             self.encoder["0"] = DownConvBlock(
@@ -337,8 +348,14 @@ class UNet2DFiLM(nn.Module):
             out_ch = [self.size * (2**i), self.size * (2 ** (i + 1))]
             key = str(i)
 
-            if self.use_film and i >= self.film_start:                
-                self.encoder[key] = DownConvBlockFiLM(in_ch, out_ch, n_organs=n_organs, emb_dim=self.film_embed, film_autoembed = self.film_autoembed)
+            if self.use_film and i >= self.film_start:
+                self.encoder[key] = DownConvBlockFiLM(
+                    in_ch,
+                    out_ch,
+                    n_organs=n_organs,
+                    emb_dim=self.film_embed,
+                    film_autoembed=self.film_autoembed,
+                )
             else:
                 self.encoder[key] = DownConvBlock(in_ch, out_ch)
 
@@ -349,7 +366,7 @@ class UNet2DFiLM(nn.Module):
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
                 n_organs=n_organs,
                 emb_dim=self.film_embed,
-                film_autoembed = self.film_autoembed
+                film_autoembed=self.film_autoembed,
             )
         else:
             self.bottleneck = UpConvBlock(
@@ -374,7 +391,7 @@ class UNet2DFiLM(nn.Module):
                     [self.size * (2**i), self.size * (2**i)],
                     n_organs=n_organs,
                     emb_dim=self.film_embed,
-                    film_autoembed = self.film_autoembed
+                    film_autoembed=self.film_autoembed,
                 )
             else:
                 self.decoder[str(i - 1)] = UpConvBlock(
@@ -393,7 +410,7 @@ class UNet2DFiLM(nn.Module):
                 n_organs=n_organs,
                 up_conv=False,
                 emb_dim=self.film_embed,
-                film_autoembed = self.film_autoembed
+                film_autoembed=self.film_autoembed,
             )
         else:
             self.decoder["0"] = UpConvBlock(
@@ -407,6 +424,37 @@ class UNet2DFiLM(nn.Module):
             self.out_channels,
             conv_kwargs={"kernel_size": 1, "stride": 1, "padding": 0},
         )
+
+        if self.distill:
+            from segment_anything import sam_model_registry
+            from copy import deepcopy
+            from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
+            from safetensors.torch import load_file
+
+            self.distill_upconv = torch.nn.ConvTranspose2d(
+                2048, 256, 3, 2, padding=1, output_padding=1
+            )
+
+            sam_model = sam_model_registry["vit_b"](
+                checkpoint="/media/raid0/US_FiLMUNet/checkpoints/medsam_base/medsam_vit_b.pth"
+            )
+            self.distill_model = MedSAM(
+                image_encoder=deepcopy(sam_model.image_encoder),
+                mask_decoder=deepcopy(sam_model.mask_decoder),
+                prompt_encoder=deepcopy(sam_model.prompt_encoder),
+                predict_bboxes=True,
+                freeze_image_encoder=0,
+            )
+            state_dict = load_file(
+                "/media/raid0/US_FiLMUNet/checkpoints/medsam_unfreezed/model.safetensors"
+            )
+            self.distill_model.load_state_dict(state_dict)
+            load_result = self.distill_model.load_state_dict(state_dict)
+            for p in self.distill_model.parameters():
+                p.requires_grad = False
+            self.distill_model.eval()
+            print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
+            self.distill_loss = DistillationLoss()
 
     def _enc_forward(self, layer, x, organ_id):
         """Helper to call encoder blocks with or without FiLM"""
@@ -479,7 +527,13 @@ class UNet2DFiLM(nn.Module):
         return out
 
     def forward(
-        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None, organ_id_metric=None
+        self,
+        pixel_values,
+        organ_id=None,
+        labels=None,
+        masks=None,
+        bbox_coords=None,
+        organ_id_metric=None,
     ):
         """
         Full forward pass through the network.
@@ -513,7 +567,7 @@ class UNet2DFiLM(nn.Module):
 
         # Bottleneck
         out = self._bottleneck_forward(out, organ_id)
-
+        out_bottleneck = out
         # Decoder
         for key in self.decoder:
             out = self._dec_forward(
@@ -535,7 +589,27 @@ class UNet2DFiLM(nn.Module):
         else:
             loss = 0.0
 
-        return {"loss": loss, "logits": out, "labels": masks, "organ_id": organ_id, "organ_id_metric": organ_id_metric}
+        if self.distill:
+            with torch.no_grad():
+                self.distill_model.eval()
+                up_pixel_values = v2.functional.resize(pixel_values, 1024, v2.InterpolationMode.BICUBIC)
+                image_embedding = self.distill_model.image_encoder(up_pixel_values)
+                
+            up_feat = self.distill_upconv(out_bottleneck)
+            distill_loss = self.distill_loss(
+                student_logits=up_feat, teacher_logits=image_embedding
+            )
+            # print(f"distill_loss: {distill_loss}")
+            if wandb.run is not None:
+                wandb.log({"distill_loss": distill_loss['loss'].item()}, commit=False)
+            loss = loss + distill_loss['loss']
+        return {
+            "loss": loss,
+            "logits": out,
+            "labels": masks,
+            "organ_id": organ_id,
+            "organ_id_metric": organ_id_metric,
+        }
 
     def __str__(self):
         model_parameters = filter(lambda p: p.requires_grad, self.parameters())

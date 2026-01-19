@@ -84,6 +84,11 @@ def parse_args():
         type=int,
         default=10,
     )
+    parser.add_argument(
+        "--id-dropout",
+        type=float,
+        default=0.0,
+    )
     # -----------------------------------------------
     # |                 SEGM Config                 |
     # -----------------------------------------------
@@ -131,7 +136,11 @@ def parse_args():
         type=int,
         default=1,
     )
-    
+    parser.add_argument(
+        "--distill",
+        type=int,
+        default=0,
+    )
     # -----------------------------------------------
     # |         Optim & Scheduler Config            |
     # -----------------------------------------------

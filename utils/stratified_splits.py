@@ -70,6 +70,7 @@ def build_train_val_datasets(
         use_cluster_id = args.use_cluster_id,
         enc_type = args.enc_type,
         num_clusters = args.num_clusters,
+        id_dropout=args.id_dropout
     )
 
     # 2) Get reproducible stratified indices (80/20)
@@ -93,6 +94,7 @@ def build_train_val_datasets(
     # )
     val_base = copy.deepcopy(train_full)
     val_base.aug = get_sft_transforms(train=False) if get_sft_transforms_ is None else get_sft_transforms_(train=False)
+    val_base.id_dropout = 0.0
     val_dataset = Subset(val_base, va_idx)
 
     print(f"[split] Total: {len(train_full)} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")

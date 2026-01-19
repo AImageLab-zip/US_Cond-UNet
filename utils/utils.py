@@ -36,6 +36,7 @@ organ_to_class_dict = {
     "liver": 6,
     "testicle": 7,
     "breast_luminal": 1,
+    "unknown": 8,
 }
 class_to_organ_dict = {v: k for k, v in organ_to_class_dict.items()}
 
@@ -60,8 +61,8 @@ dataset_to_organ_dict = {
     "private_Kidney": "kidney",
     "Fatty-Liver": "liver",
     "private_Liver": "liver",
-    "private_Testicle": "testicle",
-    "public_Testicle_syn": "testicle",
+    "private_Testicle": "unknown",
+    "public_Testicle_syn": "unknown",
 }
 dataset_for_classification = [
     "Appendix",

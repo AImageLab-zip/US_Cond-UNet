@@ -24,7 +24,7 @@ from utils.paths import *
 from torch.utils.data import Subset, ConcatDataset
 from pathlib import Path
 import pickle
-
+from accelerate import Accelerator
 
 def compute_metrics(eval_pred):
     logits, _ = eval_pred
@@ -76,11 +76,12 @@ def compute_metrics(eval_pred):
         wandb_metrics[f"dsc_{organ}"] = dsc_m
         wandb_metrics[f"nsd_{organ}"] = nsd_m
 
-    wandb_images = []
-    for i, s in enumerate(sampled):
-        wandb_images.append(wandb.Image(overlays[i], caption=f"overlap_{s}"))
+    if wandb.run is not None:
+        wandb_images = []
+        for i, s in enumerate(sampled):
+            wandb_images.append(wandb.Image(overlays[i], caption=f"overlap_{s}"))
 
-    wandb.log({"overlays_eval": wandb_images}, commit=False)
+        wandb.log({"overlays_eval": wandb_images}, commit=False)
 
     return wandb_metrics
 
@@ -197,15 +198,18 @@ def train(args: Namespace):
     print(
         f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}, Test dataset size: {len(test_dataset)}"
     )
-    wandb.login()
-    wandb.init(
-        entity=args.wandb_entity,
-        project=args.wandb_project,
-        name=args.wandb_run_name,
-        config=args,
-        # resume = True,
-        # id = '9bv2or43'
-    )
+    accelerator = Accelerator()
+
+    if accelerator.is_main_process:
+        wandb.login()
+        wandb.init(
+            entity=args.wandb_entity,
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=args,
+            # resume = True,
+            # id = '9bv2or43'
+        )
     if args.use_medsam:
         from segment_anything import sam_model_registry
 
@@ -242,7 +246,8 @@ def train(args: Namespace):
             film_start=args.film_start,
             use_film=args.use_film,
             film_embed=args.film_embed,
-            film_autoembed = bool(args.film_autoembed)
+            film_autoembed = bool(args.film_autoembed),
+            distill = bool(args.distill)
         )
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
@@ -295,14 +300,16 @@ def train(args: Namespace):
         seed=args.seed,
         save_strategy="steps",
         eval_strategy="steps",
-        save_steps=int(args.epochs / 100),
-        eval_steps=int(args.epochs / 100),
+        save_steps=int(args.epochs / 50),
+        eval_steps=int(args.epochs / 50),
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         save_total_limit=2,
         report_to=["wandb"] if args.wandb_project else None,
         run_name=args.wandb_run_name,
         dataloader_num_workers=args.num_workers,
+        dataloader_persistent_workers=True,  
+        dataloader_pin_memory=True,
         logging_steps=10,
         log_level="info",
         eval_accumulation_steps=100,
