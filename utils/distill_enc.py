@@ -449,8 +449,8 @@ def main(args: Namespace):
     )
     
     print("\nStarting Phase 1 training...")
-    # trainer_phase1.train()
-    # trainer_phase1.evaluate()
+    trainer_phase1.train()
+    trainer_phase1.evaluate()
     
     # Save the student model from phase 1 (including LoRA weights)
     phase1_student_path = Path(output_dir_phase1) / "student_encoder.pth"
@@ -466,7 +466,26 @@ def main(args: Namespace):
     print("\n" + "=" * 80)
     print("PHASE 2: Segmentation Training - Training Decoder + LoRA Encoder")
     print("=" * 80)
-    
+    args.dataset_type = 'segmentation'
+    print("Loading public for train, private for test!")
+    train_dataset, val_dataset = build_train_val_datasets(
+        DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
+    )
+
+    test_dataset = USdatasetOmni(
+        DATA_DIR,
+        "val_cls",
+        transforms=get_sft_transforms(train=False),
+        data_type=args.dataset_type,
+        out_size=args.dataset_size,
+        ccl_crop=args.use_ccl_crop,
+        keep_aspect_ratio=args.keep_aspect_ratio,
+        include_testicles=True,
+        self_id=args.self_id,
+        use_cluster_id=args.use_cluster_id,
+        enc_type=args.enc_type,
+        num_clusters=args.num_clusters,
+    )
     # Create new student with same architecture
     student_phase2 = UNet2DFiLM(
         in_channels=3,
