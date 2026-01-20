@@ -571,6 +571,7 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        **kwargs #ignored, for peft compatibility
     ):
         """
         Full forward pass through the network.
@@ -675,7 +676,7 @@ class DiceBCELoss(nn.Module):
         
         # If no valid samples, return zero loss
         if not valid_mask.any():
-            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+            return logits.sum() * 0.0
         
         # Filter out invalid samples
         logits = logits[valid_mask]
@@ -742,7 +743,7 @@ class MedSAM(nn.Module):
         )
 
     def forward(
-        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None
+        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None, organ_id_metric=None,
     ):
         batch_size = pixel_values.shape[0]
 
@@ -760,8 +761,8 @@ class MedSAM(nn.Module):
             bbox_out = None
 
         # Expand learned embeddings to batch size
-        sparse_embeddings = self.learned_sparse_embeddings.expand(batch_size, -1, -1)
-        dense_embeddings = self.learned_dense_embeddings.expand(batch_size, -1, -1, -1)
+        sparse_embeddings = self.learned_sparse_embeddings
+        dense_embeddings = self.learned_dense_embeddings
 
         # Get positional encoding
         image_pe = self.prompt_encoder.get_dense_pe()  # (1, 256, 64, 64)
@@ -786,6 +787,7 @@ class MedSAM(nn.Module):
             "logits": low_res_masks.squeeze(1),
             "labels": masks,
             "organ_id": organ_id,
+            "organ_id_metric": organ_id_metric,
         }
 
 
