@@ -1,6 +1,6 @@
 DATA_DIR = "/work/tesi_nmorelli/UUSIC_new/datasets/data_all/pt_data"
 SYN_TESTICLE_DATASET_PATH = "/work/tesi_nmorelli/UUSIC_new/datasets/data_testicles_synthetic/pt_data"
-MEDSAM_BASE_WEIGHTS = "/media/raid0/US_FiLMUNet/checkpoints/medsam_base/medsam_vit_b.pth"
+MEDSAM_BASE_WEIGHTS = "/work/tesi_nmorelli/UUSIC_new/checkpoints/medsam_base/medsam_vit_b.pth"
 TESTICLE_DATSET_PATH = "/work/tesi_nmorelli/UUSIC_new/datasets/data_only_testicles/pt_data"
 TESTICLE_ALLID_DATSET_PATH = "/work/tesi_nmorelli/UUSIC_new/datasets/data_testicles/pt_data"
 FILMUNET4_CHECKPOINT = '/work/tesi_nmorelli/UUSIC_new/src/loggings/943e26c0aacb/checkpoint-9313/model.safetensors'
