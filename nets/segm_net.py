@@ -5,6 +5,8 @@ import numpy as np
 import os, sys, wandb
 from torchvision.transforms import v2
 from utils.utils import organ_to_class_dict
+from utils.paths import *
+
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -430,51 +432,46 @@ class UNet2DFiLM(nn.Module):
             from copy import deepcopy
             from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
             from safetensors.torch import load_file
-            
+
             student_channels = 2048 // (2 ** (5 - self.depth))
             student_spatial = 32 * (2 ** (5 - self.depth))
-            
+
             # Target: 256 channels, 64x64 (teacher output)
             target_channels = 256
             target_spatial = 64
-            
+
             # Calculate upsampling factor
             spatial_factor = target_spatial // student_spatial
-            
+
             if spatial_factor > 1:
                 # Need upsampling
                 self.distill_upconv = nn.ConvTranspose2d(
-                    student_channels, 
-                    target_channels, 
-                    kernel_size=3, 
-                    stride=spatial_factor, 
-                    padding=1, 
-                    output_padding=spatial_factor - 1
+                    student_channels,
+                    target_channels,
+                    kernel_size=3,
+                    stride=spatial_factor,
+                    padding=1,
+                    output_padding=spatial_factor - 1,
                 )
             elif spatial_factor == 1:
                 # Same spatial size, just adjust channels
                 self.distill_upconv = nn.Conv2d(
-                    student_channels, 
-                    target_channels, 
-                    kernel_size=1
+                    student_channels, target_channels, kernel_size=1
                 )
             else:
                 # Need downsampling
                 downsample_factor = student_spatial // target_spatial
                 self.distill_upconv = nn.Sequential(
                     nn.Conv2d(
-                        student_channels, 
-                        target_channels, 
-                        kernel_size=3, 
-                        stride=downsample_factor, 
-                        padding=1
+                        student_channels,
+                        target_channels,
+                        kernel_size=3,
+                        stride=downsample_factor,
+                        padding=1,
                     )
                 )
 
-
-            sam_model = sam_model_registry["vit_b"](
-                checkpoint="/media/raid0/US_FiLMUNet/checkpoints/medsam_base/medsam_vit_b.pth"
-            )
+            sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
             self.distill_model = MedSAM(
                 image_encoder=deepcopy(sam_model.image_encoder),
                 mask_decoder=deepcopy(sam_model.mask_decoder),
@@ -483,7 +480,7 @@ class UNet2DFiLM(nn.Module):
                 freeze_image_encoder=0,
             )
             state_dict = load_file(
-                "/media/raid0/US_FiLMUNet/checkpoints/medsam_unfreezed/model.safetensors"
+                "/work/tesi_nmorelli/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
             )
             self.distill_model.load_state_dict(state_dict)
             load_result = self.distill_model.load_state_dict(state_dict)
@@ -571,7 +568,7 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        **kwargs #ignored, for peft compatibility
+        **kwargs,  # ignored, for peft compatibility
     ):
         """
         Full forward pass through the network.
@@ -630,17 +627,42 @@ class UNet2DFiLM(nn.Module):
         if self.distill:
             with torch.no_grad():
                 self.distill_model.eval()
-                up_pixel_values = v2.functional.resize(pixel_values, 1024, v2.InterpolationMode.BICUBIC)
+                up_pixel_values = v2.functional.resize(
+                    pixel_values, 1024, v2.InterpolationMode.BICUBIC
+                )
                 image_embedding = self.distill_model.image_encoder(up_pixel_values)
-                
+                image_pe = self.distill_model.prompt_encoder.get_dense_pe()
+                # Decode mask
+                low_res_masks, _ = self.distill_model.mask_decoder(
+                    image_embeddings=image_embedding,  # (B, 256, 64, 64)
+                    image_pe=image_pe,  # (1, 256, 64, 64)
+                    sparse_prompt_embeddings=self.distill_model.learned_sparse_embeddings,  # (B, 2, 256)
+                    dense_prompt_embeddings=self.distill_model.learned_dense_embeddings,  # (B, 256, 64, 64)
+                    multimask_output=False,
+                )
+
             up_feat = self.distill_upconv(out_bottleneck)
-            distill_loss = self.distill_loss(
+            distill_loss_emb = self.distill_loss(
                 student_logits=up_feat, teacher_logits=image_embedding
             )
+            mid_res_masks = v2.functional.resize(
+                low_res_masks, 512, v2.InterpolationMode.BICUBIC
+            )
+            distill_loss_logits = self.distill_loss(
+                student_logits=out, teacher_logits=mid_res_masks.squeeze(1)
+            )
+
             # print(f"distill_loss: {distill_loss}")
             if wandb.run is not None:
-                wandb.log({"distill_loss": distill_loss['loss'].item()}, commit=False)
-            loss = loss + distill_loss['loss']
+                wandb.log(
+                    {
+                        "distill_loss_emb": distill_loss_emb["loss"].item(),
+                        "distill_loss_logits": distill_loss_logits["loss"].item(),
+                    },
+                    commit=False,
+                )
+            loss = loss + (distill_loss_emb["loss"] + distill_loss_logits['loss'])/2
+
         return {
             "loss": loss,
             "logits": out,
@@ -670,18 +692,18 @@ class DiceBCELoss(nn.Module):
     def forward(self, logits: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
         # Adjust epsilon based on dtype
         eps = 1e-4 if logits.dtype == torch.float16 else self.eps
-        
+
         # Create mask for valid samples (not all -100)
         valid_mask = (gt != -100).any(dim=tuple(range(1, gt.dim())))  # [B]
-        
+
         # If no valid samples, return zero loss
         if not valid_mask.any():
             return logits.sum() * 0.0
-        
+
         # Filter out invalid samples
         logits = logits[valid_mask]
         gt = gt[valid_mask]
-        
+
         # Replace -100 with 0 for any remaining -100 values (partial masks)
         gt = gt.clone()
         gt[gt == -100] = 0
@@ -705,7 +727,7 @@ class DiceBCELoss(nn.Module):
 
         loss = self.dice_weight * dice + self.bce_weight * bce
         return loss
-    
+
 
 class MedSAM(nn.Module):
     def __init__(
@@ -743,7 +765,13 @@ class MedSAM(nn.Module):
         )
 
     def forward(
-        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None, organ_id_metric=None,
+        self,
+        pixel_values,
+        organ_id=None,
+        labels=None,
+        masks=None,
+        bbox_coords=None,
+        organ_id_metric=None,
     ):
         batch_size = pixel_values.shape[0]
 
