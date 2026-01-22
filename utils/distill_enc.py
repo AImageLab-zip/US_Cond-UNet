@@ -309,7 +309,6 @@ def main(args: Namespace):
     
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
-    run_hash = "./loggings/13ff7ea59ad3"
     output_dir_phase1 = f"{run_hash}_1"
     print(f"Phase 1 - Saving results to: {output_dir_phase1}")
     
@@ -353,7 +352,7 @@ def main(args: Namespace):
     )
     
     print("\nStarting Phase 1 training...")
-    trainer_phase1.train(resume_from_checkpoint=True)
+    trainer_phase1.train()
     trainer_phase1.evaluate()
     
     # Save the student model from phase 1 (including LoRA weights)
