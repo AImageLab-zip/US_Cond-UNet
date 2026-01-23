@@ -227,8 +227,8 @@ class DownConvBlockAttn(nn.Module):
         super().__init__()
         assert len(in_channels) == len(out_channels) == len(layer_ids)
         self.layer_ids = layer_ids
-        self.global_transformer = global_transformer
-
+        # self.global_transformer = global_transformer
+        self.__dict__["global_transformer"] = global_transformer
         self.conv_blocks = nn.ModuleList(
             [
                 ConvBlock(in_ch, out_ch, conv_kwargs)
@@ -265,7 +265,8 @@ class UpConvBlockAttn(nn.Module):
         super().__init__()
         assert len(in_channels) == len(out_channels) == len(layer_ids)
         self.layer_ids = layer_ids
-        self.global_transformer = global_transformer
+        # self.global_transformer = global_transformer
+        self.__dict__["global_transformer"] = global_transformer
 
         self.conv_blocks = nn.ModuleList(
             [
