@@ -136,16 +136,7 @@ class GlobalTransformerModulator(nn.Module):
         self.cached_patches = None
         self.cached_batch_size = None
 
-    def compute_patches(self, original_img):
-        """Compute and cache image patches"""
-        B = original_img.size(0)
-        
-        # Only recompute if batch size changed or cache is empty
-        if self.cached_patches is None or self.cached_batch_size != B:
-            self.cached_patches = self.patch_embed(original_img)  # (B, N, D)
-            self.cached_batch_size = B
-        
-        return self.cached_patches
+
 
     def forward(
         self,
@@ -167,7 +158,7 @@ class GlobalTransformerModulator(nn.Module):
         B, C, H, W = features.shape
 
         # Get or compute cached image patches (Keys & Values)
-        patches = self.compute_patches(original_img)  # (B, N_patches, D)
+        patches = self.patch_embed(original_img)  # (B, N_patches, D)
 
         # Build query from: features + layer embedding + (optional) organ embedding
         # 1. Pool and project features
@@ -207,10 +198,6 @@ class GlobalTransformerModulator(nn.Module):
         # Apply modulation
         return gamma * features + beta
 
-    def reset_cache(self):
-        """Reset the patch cache (call at start of each forward pass)"""
-        self.cached_patches = None
-        self.cached_batch_size = None
 
 
 class DownConvBlockAttn(nn.Module):
@@ -555,9 +542,7 @@ class UNet2DAttn(nn.Module):
         organ_id_metric=None,
         **kwargs,
     ):
-        # Reset transformer cache at start of forward pass
-        if self.global_transformer is not None:
-            self.global_transformer.reset_cache()
+
 
         x = pixel_values
         original_img = pixel_values
