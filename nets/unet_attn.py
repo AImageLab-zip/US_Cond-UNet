@@ -679,7 +679,8 @@ class UNet2DAttn(nn.Module):
                     },
                     commit=False,
                 )
-            loss = loss + (distill_loss_emb["loss"] + distill_loss_logits['loss'])/2
+            
+            loss = loss + distill_loss_emb["loss"]
 
         return {
             "loss": loss,
