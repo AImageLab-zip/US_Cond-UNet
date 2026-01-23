@@ -30,7 +30,7 @@ class PatchEmbed(nn.Module):
             in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
         )
         
-        # Positional encoding
+        # Positional encoding - CRITICAL for spatial understanding
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
@@ -45,31 +45,47 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class GlobalTransformerModulator(nn.Module):
+class FiLMLayer(nn.Module):
+    """Simple FiLM layer that applies gamma * x + beta modulation"""
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor):
+        """
+        Args:
+            x: (B, C, H, W) - input features
+            gamma: (B, C, 1, 1) - scaling factors
+            beta: (B, C, 1, 1) - bias terms
+        Returns:
+            (B, C, H, W) - modulated features
+        """
+        return gamma * x + beta
+
+
+class SharedAttnModulator(nn.Module):
     """
-    Single global transformer that modulates all UNet layers.
-    Keys/Values: patches from original image
-    Queries: combination of layer features + layer embeddings
+    Shared attention modulator that computes gamma/beta for all layers at once.
+    Uses layer_id embeddings to differentiate between layers.
     """
 
     def __init__(
         self,
         n_organs: int,
-        layer_configs: list,  # List of (layer_id, feature_channels) tuples
+        n_layers: int,
+        max_channels: int,
         img_size: int = 256,
         patch_size: int = 16,
         img_channels: int = 3,
         emb_dim: int = 256,
         n_heads: int = 8,
         dropout: float = 0.1,
-        n_transformer_layers: int = 4,
     ):
         super().__init__()
         self.emb_dim = emb_dim
-        self.layer_configs = layer_configs
-        self.n_layers = len(layer_configs)
+        self.max_channels = max_channels
 
-        # Patch embedding (computed once, shared across all layers)
+        # Patch embedding with positional encoding
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
@@ -81,141 +97,129 @@ class GlobalTransformerModulator(nn.Module):
         self.organ_embed = nn.Embedding(n_organs, emb_dim)
         nn.init.normal_(self.organ_embed.weight, mean=0, std=0.02)
 
-        # Layer embeddings - each UNet layer gets a unique embedding
-        self.layer_embed = nn.Embedding(self.n_layers, emb_dim)
+        # Layer embedding - NEW
+        self.layer_embed = nn.Embedding(n_layers, emb_dim)
         nn.init.normal_(self.layer_embed.weight, mean=0, std=0.02)
-        
-        # Pre-register layer ID tensors as buffers (not parameters, won't be trained)
-        for layer_id, _ in layer_configs:
-            self.register_buffer(
-                f'layer_id_{layer_id}',
-                torch.tensor([layer_id], dtype=torch.long)
-            )
 
-        # Feature projections for each layer (spatial features -> embedding space)
-        self.feat_to_emb = nn.ModuleDict()
-        for layer_id, feat_channels in layer_configs:
-            self.feat_to_emb[str(layer_id)] = nn.Sequential(
-                nn.Conv2d(feat_channels, emb_dim, kernel_size=1),
-                nn.GroupNorm(num_groups=min(32, emb_dim), num_channels=emb_dim),
-                nn.GELU(),
-            )
+        # Learnable influence token
+        self.influence_token = nn.Parameter(torch.zeros(1, 1, emb_dim))
+        nn.init.trunc_normal_(self.influence_token, std=0.02)
 
-        # Single global transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=emb_dim,
-            nhead=n_heads,
-            dim_feedforward=emb_dim * 4,
+        # Attention with dropout
+        self.attn = nn.MultiheadAttention(
+            embed_dim=emb_dim, 
+            num_heads=n_heads, 
             dropout=dropout,
-            activation='gelu',
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=n_transformer_layers,
+            batch_first=True
         )
 
-        # Output projections for each layer (embedding -> gamma/beta)
-        self.to_gamma_beta = nn.ModuleDict()
-        for layer_id, feat_channels in layer_configs:
-            proj = nn.Sequential(
-                nn.LayerNorm(emb_dim),
-                nn.Linear(emb_dim, emb_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(emb_dim, 2 * feat_channels),
-            )
-            # Initialize to identity transformation
-            nn.init.zeros_(proj[-1].weight)
-            nn.init.constant_(proj[-1].bias[:feat_channels], 0)  # β
-            nn.init.constant_(proj[-1].bias[feat_channels:], 1)  # γ
-            self.to_gamma_beta[str(layer_id)] = proj
+        # Output projection to MAXIMUM channel size
+        self.to_gamma_beta = nn.Sequential(
+            nn.LayerNorm(emb_dim),
+            nn.Linear(emb_dim, emb_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(emb_dim, 2 * max_channels),
+        )
 
-        # Cache for image patches (computed once per forward pass)
-        self.cached_patches = None
-        self.cached_batch_size = None
+        # Initialize to identity (gamma≈1, beta≈0)
+        nn.init.zeros_(self.to_gamma_beta[-1].weight)
+        nn.init.constant_(self.to_gamma_beta[-1].bias[:max_channels], 0)  # β
+        nn.init.constant_(self.to_gamma_beta[-1].bias[max_channels:], 1)  # γ
 
-
-
-    def forward(
-        self,
-        layer_id: int,
-        features: torch.Tensor,
-        original_img: torch.Tensor,
-        organ_id: torch.Tensor = None,
+    def compute_all_modulations(
+        self, 
+        original_img: torch.Tensor, 
+        organ_id: torch.Tensor,
+        layer_configs: list[tuple[int, int]]
     ):
         """
-        Args:
-            layer_id: Which UNet layer is being modulated (0, 1, 2, ...)
-            features: (B, C, H, W) - features from the UNet layer
-            original_img: (B, 3, 256, 256) - original input image
-            organ_id: (B,) - organ type IDs (optional)
+        Compute gamma and beta for all layers at once.
         
+        Args:
+            original_img: (B, 3, 256, 256) - original input image
+            organ_id: (B,) - organ type IDs (if >= 0, use organ embedding)
+            layer_configs: list of (layer_id, n_channels) tuples
+            
         Returns:
-            Modulated features (B, C, H, W)
+            dict: {layer_id: (gamma, beta)} where gamma/beta are (B, C, 1, 1)
         """
-        B, C, H, W = features.shape
+        B = original_img.shape[0]
+        
+        # Get patch embeddings from original image (shared across all layers)
+        patches = self.patch_embed(original_img)  # (B, N, D)
+        
+        modulations = {}
+        
+        for layer_id, n_channels in layer_configs:
+            # Get layer embedding
+            layer_emb = self.layer_embed(
+                torch.tensor([layer_id], device=original_img.device)
+            )  # (1, D)
+            layer_emb = layer_emb.expand(B, -1)  # (B, D)
+            
+            # Determine query based on organ_id validity
+            if organ_id is not None and (organ_id >= 0).all():
+                # Cross-attention mode: organ + layer embedding
+                organ_emb = self.organ_embed(organ_id)  # (B, D)
+                queries = organ_emb + layer_emb  # (B, D)
+            else:
+                # Self-attention mode: pooled patches + layer embedding
+                # Global average pooling over all patches
+                patches_pooled = patches.mean(dim=1)  # (B, D)
+                queries = patches_pooled + layer_emb  # (B, D)
+            
+            queries = queries.unsqueeze(1)  # (B, 1, D)
+            
+            # Prepend influence token
+            influence_tokens = self.influence_token.expand(B, -1, -1)  # (B, 1, D)
+            queries = torch.cat([influence_tokens, queries], dim=1)  # (B, 2, D)
+            
+            # Attention
+            attn_out, _ = self.attn(
+                query=queries,  # (B, 2, D)
+                key=patches,    # (B, N, D)
+                value=patches,  # (B, N, D)
+            )
+            
+            # Average over query tokens
+            attn_out = attn_out.mean(dim=1)  # (B, D)
+            
+            # Generate gamma and beta for maximum channels
+            gamma_beta = self.to_gamma_beta(attn_out)  # (B, 2 * max_channels)
+            beta_max, gamma_max = gamma_beta.chunk(2, dim=-1)  # each (B, max_channels)
+            
+            # Adaptive pooling to target channel size
+            # beta_max = beta_max.unsqueeze(-1)  # (B, max_channels, 1)
+            # gamma_max = gamma_max.unsqueeze(-1)  # (B, max_channels, 1)
+            
+            beta = F.adaptive_avg_pool1d(beta_max, n_channels)  # (B, n_channels, 1)
+            gamma = F.adaptive_avg_pool1d(gamma_max, n_channels)  # (B, n_channels, 1)
+            
+            # Reshape for broadcasting with (B, C, H, W)
+            beta = beta.unsqueeze(-1).unsqueeze(-1)   # (B, n_channels, 1, 1)
+            gamma = gamma.unsqueeze(-1).unsqueeze(-1)  # (B, n_channels, 1, 1)
+            
+            modulations[layer_id] = (gamma, beta)
+        
+        return modulations
 
-        # Get or compute cached image patches (Keys & Values)
-        patches = self.patch_embed(original_img)  # (B, N_patches, D)
 
-        # Build query from: features + layer embedding + (optional) organ embedding
-        # 1. Pool and project features
-        feat_pooled = F.adaptive_avg_pool2d(features, (1, 1))  # (B, C, 1, 1)
-        feat_emb = self.feat_to_emb[str(layer_id)](feat_pooled)  # (B, D, 1, 1)
-        feat_emb = feat_emb.flatten(2).transpose(1, 2)  # (B, 1, D)
-
-        # 2. Add layer embedding (use pre-registered buffer)
-        layer_id_tensor = getattr(self, f'layer_id_{layer_id}')
-        layer_emb = self.layer_embed(layer_id_tensor).unsqueeze(0).expand(B, -1, -1)  # (B, 1, D)
-
-        # 3. Optionally add organ embedding
-        if organ_id is not None and (organ_id >= 0).all():
-            organ_emb = self.organ_embed(organ_id).unsqueeze(1)  # (B, 1, D)
-            query = feat_emb + layer_emb + organ_emb  # (B, 1, D)
-        else:
-            query = feat_emb + layer_emb  # (B, 1, D)
-
-        # Concatenate query with patches for transformer
-        # The transformer will process: [query_token, patch_1, ..., patch_N]
-        transformer_input = torch.cat([query, patches], dim=1)  # (B, 1+N, D)
-
-        # Global transformer processing
-        transformer_output = self.transformer(transformer_input)  # (B, 1+N, D)
-
-        # Extract the query token output (first token)
-        query_output = transformer_output[:, 0, :]  # (B, D)
-
-        # Generate gamma and beta for this layer
-        gamma_beta = self.to_gamma_beta[str(layer_id)](query_output)  # (B, 2C)
-        beta, gamma = gamma_beta.chunk(2, dim=-1)  # each (B, C)
-
-        # Reshape for broadcasting
-        beta = beta.unsqueeze(-1).unsqueeze(-1)   # (B, C, 1, 1)
-        gamma = gamma.unsqueeze(-1).unsqueeze(-1)  # (B, C, 1, 1)
-
-        # Apply modulation
-        return gamma * features + beta
-
-
-
-class DownConvBlockAttn(nn.Module):
-    """Encoder block with global transformer modulation"""
+class DownConvBlockFiLM(nn.Module):
+    """
+    Encoder block with FiLM modulation.
+    Conv → FiLM → Conv → FiLM → Pool
+    """
 
     def __init__(
         self,
         in_channels: list[int],
         out_channels: list[int],
-        layer_ids: list[int],  # List of layer IDs, one per conv block
-        global_transformer: GlobalTransformerModulator,
         conv_kwargs={"kernel_size": 3, "stride": 1, "padding": 1},
     ):
         super().__init__()
-        assert len(in_channels) == len(out_channels) == len(layer_ids)
-        self.layer_ids = layer_ids
-        # self.global_transformer = global_transformer
-        self.__dict__["global_transformer"] = global_transformer
+        assert len(in_channels) == len(out_channels)
+
         self.conv_blocks = nn.ModuleList(
             [
                 ConvBlock(in_ch, out_ch, conv_kwargs)
@@ -223,43 +227,51 @@ class DownConvBlockAttn(nn.Module):
             ]
         )
 
+        self.film_layers = nn.ModuleList(
+            [FiLMLayer() for _ in out_channels]
+        )
+
         self.pool = nn.MaxPool2d(2, 2)
 
-    def forward(
-        self, x: torch.Tensor, original_img: torch.Tensor, organ_id: torch.Tensor
-    ):
-        for i, conv in enumerate(self.conv_blocks):
+    def forward(self, x: torch.Tensor, gammas: list, betas: list):
+        """
+        Args:
+            x: (B, C, H, W) - features from previous layer
+            gammas: list of gamma tensors for each conv block
+            betas: list of beta tensors for each conv block
+        """
+        for conv, film, gamma, beta in zip(self.conv_blocks, self.film_layers, gammas, betas):
             x = conv(x)
-            # Apply global transformer modulation after each conv
-            x = self.global_transformer(self.layer_ids[i], x, original_img, organ_id)
-        
+            x = film(x, gamma, beta)
         return self.pool(x), x
 
 
-class UpConvBlockAttn(nn.Module):
-    """Decoder block with global transformer modulation"""
+class UpConvBlockFiLM(nn.Module):
+    """
+    Decoder block with FiLM modulation.
+    Conv → FiLM → Conv → FiLM → (optional) ConvTranspose2d
+    """
 
     def __init__(
         self,
         in_channels: list[int],
         out_channels: list[int],
-        layer_ids: list[int],  # List of layer IDs, one per conv block
-        global_transformer: GlobalTransformerModulator,
         up_conv: bool = True,
         conv_kwargs: dict = {"kernel_size": 3, "stride": 1, "padding": 1},
         upconv_kwargs: dict = {"kernel_size": 2, "stride": 2},
     ):
         super().__init__()
-        assert len(in_channels) == len(out_channels) == len(layer_ids)
-        self.layer_ids = layer_ids
-        # self.global_transformer = global_transformer
-        self.__dict__["global_transformer"] = global_transformer
+        assert len(in_channels) == len(out_channels)
 
         self.conv_blocks = nn.ModuleList(
             [
                 ConvBlock(in_ch, out_ch, conv_kwargs)
                 for in_ch, out_ch in zip(in_channels, out_channels)
             ]
+        )
+
+        self.film_layers = nn.ModuleList(
+            [FiLMLayer() for _ in out_channels]
         )
 
         self.up_conv = up_conv
@@ -268,13 +280,16 @@ class UpConvBlockAttn(nn.Module):
                 out_channels[-1], out_channels[-1], **upconv_kwargs
             )
 
-    def forward(
-        self, x: torch.Tensor, original_img: torch.Tensor, organ_id: torch.Tensor
-    ):
-        for i, conv in enumerate(self.conv_blocks):
+    def forward(self, x: torch.Tensor, gammas: list, betas: list):
+        """
+        Args:
+            x: (B, C, H, W)
+            gammas: list of gamma tensors for each conv block
+            betas: list of beta tensors for each conv block
+        """
+        for conv, film, gamma, beta in zip(self.conv_blocks, self.film_layers, gammas, betas):
             x = conv(x)
-            # Apply global transformer modulation after each conv
-            x = self.global_transformer(self.layer_ids[i], x, original_img, organ_id)
+            x = film(x, gamma, beta)
 
         if self.up_conv:
             x = self.up_conv_op(x)
@@ -284,9 +299,8 @@ class UpConvBlockAttn(nn.Module):
 
 class UNet2DAttn(nn.Module):
     """
-    UNet with a single global transformer that modulates all layers.
-    The transformer uses image patches as keys/values and layer-specific
-    queries that incorporate layer embeddings.
+    UNet with shared attention-based conditioning.
+    Computes all gamma/beta at the start of forward pass.
     """
 
     def __init__(
@@ -302,9 +316,22 @@ class UNet2DAttn(nn.Module):
         patch_size: int = 16,
         emb_dim: int = 256,
         n_heads: int = 8,
-        n_transformer_layers: int = 4,
         distill: bool = False,
     ):
+        """
+        Args:
+            in_channels: Number of input channels
+            num_classes: Number of output classes
+            n_organs: Number of organ types
+            size: Base number of channels
+            depth: Number of encoder/decoder levels
+            attn_start: Level where attention starts (0-based)
+            use_attn: If False, use plain Conv blocks
+            img_size: Size of input images (assumed square)
+            patch_size: Patch size for attention
+            emb_dim: Embedding dimension for attention
+            n_heads: Number of attention heads
+        """
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = num_classes
@@ -318,128 +345,97 @@ class UNet2DAttn(nn.Module):
 
         self.criterion = DiceBCELoss()
 
-        # Build layer configuration for global transformer
-        layer_configs = []
-        layer_id = 0
-        
-        # Encoder layers
-        layer_configs.extend([(layer_id, size), (layer_id + 1, size * 2)])
-        layer_id += 2
-        
-        for i in range(1, depth):
-            layer_configs.extend([
-                (layer_id, size * (2**i)),
-                (layer_id + 1, size * (2**(i+1)))
-            ])
-            layer_id += 2
-        
-        # Bottleneck
-        layer_configs.extend([
-            (layer_id, size * (2**depth)),
-            (layer_id + 1, size * (2**(depth+1)))
-        ])
-        layer_id += 2
-        
-        # Decoder layers
-        for i in range(depth, 0, -1):
-            layer_configs.extend([
-                (layer_id, size * (2**i)),
-                (layer_id + 1, size * (2**i))
-            ])
-            layer_id += 2
+        # Compute max channels needed
+        max_channels = size * (2 ** (depth + 1))
 
-        # Create single global transformer
+        # Create shared attention modulator
         if self.use_attn:
-            self.global_transformer = GlobalTransformerModulator(
+            # Count total number of layers that will use attention
+            n_attn_layers = 0
+            for i in range(depth):
+                if i >= self.attn_start:
+                    n_attn_layers += 2  # encoder has 2 conv blocks per level
+            n_attn_layers += 2  # bottleneck
+            for i in range(depth):
+                if i >= self.attn_start:
+                    n_attn_layers += 2  # decoder has 2 conv blocks per level
+            
+            self.shared_attn = SharedAttnModulator(
                 n_organs=n_organs,
-                layer_configs=layer_configs,
+                n_layers=n_attn_layers,
+                max_channels=max_channels,
                 img_size=img_size,
                 patch_size=patch_size,
                 emb_dim=emb_dim,
                 n_heads=n_heads,
-                n_transformer_layers=n_transformer_layers,
             )
-        else:
-            self.global_transformer = None
 
-        # Track current layer ID
-        self.current_layer_id = 0
-
-        # Encoder
+        # ---------------- Encoder ----------------
         self.encoder = nn.ModuleDict()
-        
+
+        # First encoder block
         if self.use_attn and 0 >= self.attn_start:
-            self.encoder["0"] = DownConvBlockAttn(
+            self.encoder["0"] = DownConvBlockFiLM(
                 [self.in_channels, self.size],
                 [self.size, self.size * 2],
-                layer_ids=[0, 1],
-                global_transformer=self.global_transformer,
             )
         else:
             self.encoder["0"] = DownConvBlock(
                 [self.in_channels, self.size], [self.size, self.size * 2]
             )
 
-        layer_id = 2
+        # Remaining encoder blocks
         for i in range(1, self.depth):
             in_ch = [self.size * (2**i), self.size * (2**i)]
             out_ch = [self.size * (2**i), self.size * (2 ** (i + 1))]
             key = str(i)
 
             if self.use_attn and i >= self.attn_start:
-                self.encoder[key] = DownConvBlockAttn(
-                    in_ch,
-                    out_ch,
-                    layer_ids=[layer_id, layer_id + 1],
-                    global_transformer=self.global_transformer,
-                )
+                self.encoder[key] = DownConvBlockFiLM(in_ch, out_ch)
             else:
                 self.encoder[key] = DownConvBlock(in_ch, out_ch)
-            layer_id += 2
 
-        # Bottleneck
+        # ---------------- Bottleneck ----------------
         if self.use_attn:
-            self.bottleneck = UpConvBlockAttn(
+            self.bottleneck = UpConvBlockFiLM(
                 [self.size * (2**self.depth), self.size * (2**self.depth)],
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
-                layer_ids=[layer_id, layer_id + 1],
-                global_transformer=self.global_transformer,
             )
         else:
             self.bottleneck = UpConvBlock(
                 [self.size * (2**self.depth), self.size * (2**self.depth)],
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
             )
-        layer_id += 2
 
-        # Decoder
+        # ---------------- Decoder ----------------
         self.decoder = nn.ModuleDict()
 
         for i in range(self.depth, 1, -1):
             use_attn_at_level = self.use_attn and (i - 1) >= self.attn_start
 
             if use_attn_at_level:
-                self.decoder[str(i - 1)] = UpConvBlockAttn(
-                    [self.size * (2 ** (i + 1)) + self.size * (2**i), self.size * (2**i)],
+                self.decoder[str(i - 1)] = UpConvBlockFiLM(
+                    [
+                        self.size * (2 ** (i + 1)) + self.size * (2**i),
+                        self.size * (2**i),
+                    ],
                     [self.size * (2**i), self.size * (2**i)],
-                    layer_ids=[layer_id, layer_id + 1],
-                    global_transformer=self.global_transformer,
                 )
             else:
                 self.decoder[str(i - 1)] = UpConvBlock(
-                    [self.size * (2 ** (i + 1)) + self.size * (2**i), self.size * (2**i)],
+                    [
+                        self.size * (2 ** (i + 1)) + self.size * (2**i),
+                        self.size * (2**i),
+                    ],
                     [self.size * (2**i), self.size * (2**i)],
                 )
-            layer_id += 2
 
-        # Final decoder
+        # Final decoder block
         if self.use_attn and 0 >= self.attn_start:
-            self.decoder["0"] = UpConvBlockAttn(
+            self.decoder["0"] = UpConvBlockFiLM(
                 [self.size * 4 + self.size * 2, self.size * 2],
                 [self.size * 2, self.size * 2],
-                layer_ids=[layer_id, layer_id + 1],
-                global_transformer=self.global_transformer,
-                up_conv=False,
+                up_conv = False
             )
         else:
             self.decoder["0"] = UpConvBlock(
@@ -455,8 +451,6 @@ class UNet2DAttn(nn.Module):
         )
 
         if self.distill:
-            
-
             student_channels = 2048 // (2 ** (5 - self.depth))
             student_spatial = 32 * (2 ** (5 - self.depth))
 
@@ -514,23 +508,41 @@ class UNet2DAttn(nn.Module):
             print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
             self.distill_loss = DistillationLoss()
 
-    def _enc_forward(self, layer, x, original_img, organ_id):
-        if isinstance(layer, DownConvBlockAttn):
-            return layer(x, original_img, organ_id)
-        else:
-            return layer(x)
 
-    def _dec_forward(self, layer, x, original_img, organ_id):
-        if isinstance(layer, UpConvBlockAttn):
-            return layer(x, original_img, organ_id)
-        else:
-            return layer(x)
+    def _build_layer_configs(self):
+        """
+        Build list of (layer_id, n_channels) for all layers that use attention.
+        Layer IDs are sequential: 0, 1, 2, ...
+        """
+        configs = []
+        layer_id = 0
 
-    def _bottleneck_forward(self, x, original_img, organ_id):
-        if isinstance(self.bottleneck, UpConvBlockAttn):
-            return self.bottleneck(x, original_img, organ_id)
-        else:
-            return self.bottleneck(x)
+        # Encoder layers
+        for i in range(self.depth):
+            if self.use_attn and i >= self.attn_start:
+                # Each encoder block has 2 conv outputs
+                configs.append((layer_id, self.size * (2**i)))
+                layer_id += 1
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+
+        # Bottleneck (2 conv blocks)
+        if self.use_attn:
+            configs.append((layer_id, self.size * (2**self.depth)))
+            layer_id += 1
+            configs.append((layer_id, self.size * (2 ** (self.depth + 1))))
+            layer_id += 1
+
+        # Decoder layers
+        for i in range(self.depth - 1, -1, -1):
+            if self.use_attn and i >= self.attn_start:
+                # Each decoder block has 2 conv outputs
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+
+        return configs
 
     def forward(
         self,
@@ -542,13 +554,31 @@ class UNet2DAttn(nn.Module):
         organ_id_metric=None,
         **kwargs,
     ):
+        """
+        Forward pass through the network.
 
-
+        Args:
+            pixel_values: Input images (B, C, H, W) - MUST be 256x256
+            organ_id: Organ type IDs for attention conditioning (B,)
+            masks: Ground truth masks (B, H, W)
+        """
         x = pixel_values
         original_img = pixel_values
+
+        # Pre-compute all gamma/beta if using attention
+        if self.use_attn:
+            layer_configs = self._build_layer_configs()
+            modulations = self.shared_attn.compute_all_modulations(
+                original_img, organ_id, layer_configs
+            )
+            
+            # Convert to list for easy indexing
+            mod_list = [modulations[i] for i in range(len(layer_configs))]
+            mod_idx = 0
+        
         feat_list = []
 
-        # Padding
+        # Padding if needed
         pre_padding = (x.size(-1) % 2**self.depth != 0) or (
             x.size(-2) % 2**self.depth != 0
         ) or (x.size(-3) % 2**self.depth != 0)
@@ -557,26 +587,47 @@ class UNet2DAttn(nn.Module):
             original_img, _ = pad_to_2d(original_img, 2**self.depth)
 
         # Encoder
-        out, feat = self._enc_forward(self.encoder["0"], x, original_img, organ_id)
+        if isinstance(self.encoder["0"], DownConvBlockFiLM):
+            gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+            betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+            mod_idx += 2
+            out, feat = self.encoder["0"](x, gammas, betas)
+        else:
+            out, feat = self.encoder["0"](x)
         feat_list.append(feat)
 
         for key in list(self.encoder.keys())[1:]:
-            out, feat = self._enc_forward(
-                self.encoder[key], out, original_img, organ_id
-            )
+            if isinstance(self.encoder[key], DownConvBlockFiLM):
+                gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+                betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+                mod_idx += 2
+                out, feat = self.encoder[key](out, gammas, betas)
+            else:
+                out, feat = self.encoder[key](out)
             feat_list.append(feat)
 
         # Bottleneck
-        out = self._bottleneck_forward(out, original_img, organ_id)
+        if isinstance(self.bottleneck, UpConvBlockFiLM):
+            gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+            betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+            mod_idx += 2
+            out = self.bottleneck(out, gammas, betas)
+        else:
+            out = self.bottleneck(out)
         out_bottleneck = out
+
         # Decoder
         for key in self.decoder:
-            out = self._dec_forward(
-                self.decoder[key],
-                torch.cat((out, feat_list[int(key)]), dim=1),
-                original_img,
-                organ_id,
-            )
+            concat_feat = torch.cat((out, feat_list[int(key)]), dim=1)
+            
+            if isinstance(self.decoder[key], UpConvBlockFiLM):
+                gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+                betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+                mod_idx += 2
+                out = self.decoder[key](concat_feat, gammas, betas)
+            else:
+                out = self.decoder[key](concat_feat)
+            
             del feat_list[int(key)]
 
         # Output
@@ -585,12 +636,12 @@ class UNet2DAttn(nn.Module):
         if pre_padding:
             out = unpad_2d(out, pads).squeeze(1)
 
-        # Loss
+        # Calculate loss if masks provided
         if masks is not None:
             loss = self.criterion(out, masks)
         else:
             loss = 0.0
-        
+
         if self.distill:
             with torch.no_grad():
                 self.distill_model.eval()

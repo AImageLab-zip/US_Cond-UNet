@@ -250,6 +250,7 @@ def train(args: Namespace):
         #     film_autoembed = bool(args.film_autoembed),
         #     distill = bool(args.distill)
         # )
+
         model = UNet2DAttn(
             in_channels=3,
             num_classes=1,
@@ -260,9 +261,9 @@ def train(args: Namespace):
             use_attn=args.use_film,     # Enable attention
             img_size=512,      # Input image size
             patch_size=8,     # 16×16 patches → 256 patches total
-            emb_dim=384,       # Embedding dimension
-            n_heads=4,        # Number of attention heads
-            n_transformer_layers = 12,
+            emb_dim=768,       # Embedding dimension
+            n_heads=8,        # Number of attention heads
+            # n_transformer_layers = 12,
             distill = bool(args.distill)
         )
 
