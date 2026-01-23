@@ -9,6 +9,7 @@ import torch, wandb, random
 from sklearn.metrics import accuracy_score
 from nets.cls_net import OmniClsCBAM
 from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
+from nets.unet_attn import UNet2DAttn
 from utils.paths import DATA_DIR
 from utils.utils import organ_to_class_dict, multi_cls_labels_dict, generate_run_hash
 import numpy as np
@@ -237,18 +238,34 @@ def train(args: Namespace):
         )
 
     else:
-        model = UNet2DFiLM(
+        # model = UNet2DFiLM(
+        #     in_channels=3,
+        #     num_classes=1,
+        #     n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict) ,
+        #     size=32,
+        #     depth=args.unet_depth,
+        #     film_start=args.film_start,
+        #     use_film=args.use_film,
+        #     film_embed=args.film_embed,
+        #     film_autoembed = bool(args.film_autoembed),
+        #     distill = bool(args.distill)
+        # )
+        model = UNet2DAttn(
             in_channels=3,
             num_classes=1,
-            n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict) ,
+            n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict),
             size=32,
             depth=args.unet_depth,
-            film_start=args.film_start,
-            use_film=args.use_film,
-            film_embed=args.film_embed,
-            film_autoembed = bool(args.film_autoembed),
+            attn_start=args.use_film,      # Start attention from first level
+            use_attn=args.use_film,     # Enable attention
+            img_size=512,      # Input image size
+            patch_size=8,     # 16×16 patches → 256 patches total
+            emb_dim=384,       # Embedding dimension
+            n_heads=4,        # Number of attention heads
+            n_transformer_layers = 12,
             distill = bool(args.distill)
         )
+
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
     output_dir = f"{run_hash}"

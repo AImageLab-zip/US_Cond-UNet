@@ -36,7 +36,7 @@ organ_to_class_dict = {
     "liver": 6,
     "testicle": 7,
     "breast_luminal": 1,
-    "unknown": 8,
+    "unknown": -1,
 }
 class_to_organ_dict = {v: k for k, v in organ_to_class_dict.items()}
 
