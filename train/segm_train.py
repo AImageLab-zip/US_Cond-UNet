@@ -22,10 +22,11 @@ from utils.utils import (
 )
 from utils.stratified_splits import build_train_val_datasets
 from utils.paths import *
-from torch.utils.data import Subset, ConcatDataset
+from torch.utils.data import DataLoader, Subset, ConcatDataset
 from pathlib import Path
 import pickle
 from accelerate import Accelerator
+from utils.sampler import BalancedHierarchicalSampler
 
 def compute_metrics(eval_pred):
     logits, _ = eval_pred
@@ -199,6 +200,12 @@ def train(args: Namespace):
     print(
         f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}, Test dataset size: {len(test_dataset)}"
     )
+    train_sampler = BalancedHierarchicalSampler(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            steps_per_epoch=int(args.epochs / 50),
+            seed=args.seed,
+        )
     accelerator = Accelerator()
 
     if accelerator.is_main_process:
@@ -315,15 +322,52 @@ def train(args: Namespace):
         # push_to_hub=False,
     )
 
-    trainer = Trainer(
+    trainer = CustomTrainerWithSampler(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
+        train_sampler=train_sampler,
+
     )
+    # trainer = CustomTrainerWithSampler(
+    #     model=model,
+    #     args=training_args,
+    #     train_dataset=dataset,
+    #     eval_dataset=dataset,
+    #     compute_metrics=compute_metrics,
+    # )
     trainer.train()
     trainer.evaluate()
 
     predictions = trainer.predict(test_dataset=test_dataset)
     print("Test results:", predictions.metrics)
+
+
+class CustomTrainerWithSampler(Trainer):
+    """
+    Custom Trainer that uses BalancedHierarchicalSampler for training.
+    """
+    
+    def __init__(self, *args, train_sampler=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.train_sampler = train_sampler
+    
+    def get_train_dataloader(self):
+        """
+        Override to use our custom batch sampler.
+        """
+        if self.train_sampler is None:
+            # Fallback to default behavior
+            return super().get_train_dataloader()
+        
+        # Create DataLoader with our batch sampler
+        return DataLoader(
+            self.train_dataset,
+            batch_sampler=self.train_sampler,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            persistent_workers=self.args.dataloader_persistent_workers,
+            prefetch_factor=self.args.dataloader_prefetch_factor if self.args.dataloader_num_workers > 0 else None,
+        )
