@@ -264,7 +264,7 @@ def train(args: Namespace):
             n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict),
             size=32,
             depth=args.unet_depth,
-            attn_start=args.use_film,      # Start attention from first level
+            attn_start=args.film_start,      # Start attention from first level
             use_attn=args.use_film,     # Enable attention
             img_size=512,      # Input image size
             patch_size=8,     # 16×16 patches → 256 patches total
