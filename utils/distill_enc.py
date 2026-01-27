@@ -238,8 +238,6 @@ def main(args: Namespace):
         depth=args.unet_depth,
         film_start=args.film_start,
         use_film=args.use_film,
-        film_embed=args.film_embed,
-        film_autoembed=bool(args.film_autoembed),
         distill=bool(args.distill),
     )
 
@@ -286,10 +284,6 @@ def main(args: Namespace):
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
         include_testicles=True,
-        self_id=args.self_id,
-        use_cluster_id=args.use_cluster_id,
-        enc_type=args.enc_type,
-        num_clusters=args.num_clusters,
     )
     
     print(
@@ -384,10 +378,6 @@ def main(args: Namespace):
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
         include_testicles=True,
-        self_id=args.self_id,
-        use_cluster_id=args.use_cluster_id,
-        enc_type=args.enc_type,
-        num_clusters=args.num_clusters,
     )
     # Create new student with same architecture
     student_phase2 = UNet2DFiLM(
@@ -398,8 +388,6 @@ def main(args: Namespace):
         depth=args.unet_depth,
         film_start=args.film_start,
         use_film=args.use_film,
-        film_embed=args.film_embed,
-        film_autoembed=bool(args.film_autoembed),
         distill=False,
     )
     

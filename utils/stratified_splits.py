@@ -66,10 +66,6 @@ def build_train_val_datasets(
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
         include_testicles=False,
-        self_id = args.self_id,
-        use_cluster_id = args.use_cluster_id,
-        enc_type = args.enc_type,
-        num_clusters = args.num_clusters,
         id_dropout=args.id_dropout
     )
 

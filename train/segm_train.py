@@ -94,7 +94,6 @@ def train(args: Namespace):
         train_dataset, val_dataset = build_train_val_datasets(
             DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
         )
-        kmean_model = train_dataset.dataset.get_kmeans_model()
         # train_syn_dataset = USdatasetOmni(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
@@ -117,11 +116,7 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             include_testicles=True,
-            self_id = args.self_id,
-            use_cluster_id = args.use_cluster_id,
-            enc_type = args.enc_type,
-            num_clusters = args.num_clusters,
-            kmeans_model = kmean_model,
+            id_dropout=0.0
         )
     else:
         train_dataset = USdatasetOmni(
@@ -134,12 +129,8 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             include_testicles=True,
-            self_id = args.self_id,
-            enc_type = args.enc_type,
-            use_cluster_id = args.use_cluster_id,
-            num_clusters = args.num_clusters,
+            id_dropout=args.id_dropout
         )
-        kmean_model = train_dataset.get_kmeans_model()
 
         # train_syn_dataset = USdatasetOmni(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -150,8 +141,6 @@ def train(args: Namespace):
         #     ccl_crop=args.use_ccl_crop,
         #     keep_aspect_ratio=args.keep_aspect_ratio,
         #     include_testicles=True,
-        #     self_id = args.self_id,
-        #     num_clusters = args.num_clusters,
         # )
         # print(
         #     f"Synthetic dataset initialized with {len(train_syn_dataset.items)} images"
@@ -168,11 +157,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             include_testicles=True,
-            self_id = args.self_id,
-            use_cluster_id = args.use_cluster_id,
-            enc_type = args.enc_type,
-            num_clusters = args.num_clusters,
-            kmeans_model = kmean_model,
+            id_dropout=0.0,
         )
         # train_dataset, val_dataset = build_train_val_datasets(
         #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -190,11 +175,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             include_testicles=True,
-            self_id = bool(args.self_id),
-            use_cluster_id = args.use_cluster_id,
-            enc_type = args.enc_type,
-            num_clusters = args.num_clusters,
-            kmeans_model = kmean_model,
+            id_dropout=0.0,
         )
 
     print(
@@ -248,20 +229,19 @@ def train(args: Namespace):
         # model = UNet2DFiLM(
         #     in_channels=3,
         #     num_classes=1,
-        #     n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict) ,
+        #     n_organs=len(organ_to_class_dict) ,
         #     size=32,
         #     depth=args.unet_depth,
         #     film_start=args.film_start,
         #     use_film=args.use_film,
         #     film_embed=args.film_embed,
-        #     film_autoembed = bool(args.film_autoembed),
         #     distill = bool(args.distill)
         # )
 
         model = UNet2DAttn(
             in_channels=3,
             num_classes=1,
-            n_organs=args.num_clusters if bool(args.self_id) else len(organ_to_class_dict),
+            n_organs=len(organ_to_class_dict),
             size=32,
             depth=args.unet_depth,
             attn_start=args.film_start,      # Start attention from first level
@@ -277,13 +257,6 @@ def train(args: Namespace):
     # Generate custom hashed directory name
     run_hash = generate_run_hash(args)
     output_dir = f"{run_hash}"
-    if kmean_model is not None:
-        filepath = Path(f"{run_hash}/kmeans_model.pkl")
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, 'wb') as f:
-            pickle.dump(kmean_model, f)
-
-        print(f"KMeans model saved to {filepath}")
     print(f"Saving results to: {output_dir}")
 
     # for steps

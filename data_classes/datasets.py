@@ -64,11 +64,6 @@ class USdatasetOmni(Dataset):
         self_norm=False,
         include_testicles=False,
         testicle_split="",
-        self_id=False,
-        use_cluster_id = True,
-        num_clusters=10,
-        kmeans_model=None,
-        enc_type: Literal["dino", "clip"] = "dino",
         id_dropout: float = 0.0,
     ):
         base_dir = Path(base_dir)
@@ -79,11 +74,6 @@ class USdatasetOmni(Dataset):
         self.ccl_crop = ccl_crop
         self.keep_aspect_ratio = keep_aspect_ratio
         self.self_norm = self_norm
-        self.self_id = self_id
-        self.use_cluster_id = use_cluster_id
-        self.num_clusters = num_clusters
-        self.kmeans_model = kmeans_model  
-        self.enc_type = enc_type  
         self.id_dropout = id_dropout  
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
@@ -217,76 +207,6 @@ class USdatasetOmni(Dataset):
                     ):
                         self.items.append(item)
 
-        if self.self_id:
-            self.__init_self_ids__()
-
-    def __init_self_ids__(self, batch_size=32, num_workers=16):
-        if self.enc_type == "dino":
-            pretrained_model_name = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-            processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
-            model_fe = AutoModel.from_pretrained(
-                pretrained_model_name, 
-                device_map="auto", 
-            )
-            print("Computing dino embeddings")
-        elif self.enc_type == 'clip':
-            pretrained_model_name = "openai/clip-vit-large-patch14"
-            processor = AutoImageProcessor.from_pretrained(pretrained_model_name)
-            model_fe = CLIPVisionModel.from_pretrained(
-                pretrained_model_name,
-                device_map="auto",
-            )
-            print("Computing clip embeddings")
-
-        model_fe.eval()
-        # Create dataset and dataloader
-        dataset = ImageDataset(self.items, processor)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=6,
-            collate_fn=collate_fn,
-            prefetch_factor=6,
-            pin_memory=True if torch.cuda.is_available() else False
-        )
-        
-        with torch.inference_mode():
-            for inputs, indices in tqdm(dataloader, total=len(dataloader)):
-                inputs = {k: v.to(model_fe.device) for k, v in inputs.items()}
-                outputs = model_fe(**inputs)
-                
-                pooled_output = outputs.pooler_output.cpu()
-                
-                # Assign embeddings back to items
-                for idx, embedding in zip(indices, pooled_output):
-                    self.items[idx]['self_id'] = embedding
-
-        embeddings = np.stack([item['self_id'].numpy() for item in self.items])
-        
-        if self.kmeans_model is not None:
-            print(f"Using pre-trained KMeans model with {self.num_clusters} clusters")
-            cluster_labels = self.kmeans_model.predict(embeddings)
-        else:
-            print(f"Training new KMeans model with {self.num_clusters} clusters")
-            self.kmeans_model = KMeans(n_clusters=self.num_clusters, random_state=42, n_init=10)
-            cluster_labels = self.kmeans_model.fit_predict(embeddings)
-            
-        for i, item in enumerate(self.items):
-            item['cluster_id'] = cluster_labels[i]
-            item['cluster_center_distance'] = np.linalg.norm(
-                embeddings[i] - self.kmeans_model.cluster_centers_[cluster_labels[i]]
-            )
-    
-    def get_kmeans_model(self):
-        """
-        Returns the trained KMeans model.
-        Use this to pass the model from training dataset to test dataset.
-        
-        Returns:
-            KMeans model or None if not initialized
-        """
-        return self.kmeans_model
-                
     def __len__(self):
         return len(self.items)
 
@@ -363,14 +283,7 @@ class USdatasetOmni(Dataset):
             unormalized_bbox_coords = torch.tensor(
                 [-100, -100, -100, -100], dtype=torch.float32
             ).unsqueeze(0)
-        label_id = organ_to_class_dict[item["organ_label"]]
-        if self.self_id and self.use_cluster_id:
-            organ_id = torch.Tensor([item['cluster_id'].item()]).long()
-        elif self.self_id and not self.use_cluster_id:
-            organ_id = item['self_id']
-        else:
-            organ_id = label_id
-
+        organ_id = organ_to_class_dict[item["organ_label"]]
         if self.id_dropout != 0.0 and random.random() < self.id_dropout:
             organ_id = organ_to_class_dict['unknown']
         
@@ -380,7 +293,7 @@ class USdatasetOmni(Dataset):
             "labels": item["multi_cls_label"],
             "masks": mask.to(torch.float).squeeze(),
             "bbox_coords": unormalized_bbox_coords,
-            "organ_id_metric": label_id,
+            "organ_id_metric": organ_id,
         }
 
     def normalize_tensor_zscore_ignore_black(
