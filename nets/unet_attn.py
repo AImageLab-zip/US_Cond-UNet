@@ -17,6 +17,7 @@ from safetensors.torch import load_file
 from utils.paths import *
 from torchvision.transforms import v2
 
+
 class PatchEmbed(nn.Module):
     """Convert image to patches and embed them with positional encoding"""
 
@@ -29,7 +30,7 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(
             in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
         )
-        
+
         # Positional encoding - CRITICAL for spatial understanding
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -47,10 +48,10 @@ class PatchEmbed(nn.Module):
 
 class FiLMLayer(nn.Module):
     """Simple FiLM layer that applies gamma * x + beta modulation"""
-    
+
     def __init__(self):
         super().__init__()
-    
+
     def forward(self, x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor):
         """
         Args:
@@ -83,6 +84,7 @@ class SharedAttnModulator(nn.Module):
     ):
         super().__init__()
         self.emb_dim = emb_dim
+        self.n_layers = n_layers
         self.max_channels = max_channels
 
         # Patch embedding with positional encoding
@@ -94,7 +96,9 @@ class SharedAttnModulator(nn.Module):
         )
 
         # Organ embedding
-        self.organ_embed = nn.Embedding(n_organs, emb_dim)
+        self.organ_embed = nn.Embedding(
+            n_organs + 1, emb_dim
+        )  # the +1 is for the unknown organ
         nn.init.normal_(self.organ_embed.weight, mean=0, std=0.02)
 
         # Layer embedding - NEW
@@ -107,101 +111,104 @@ class SharedAttnModulator(nn.Module):
 
         # Attention with dropout
         self.attn = nn.MultiheadAttention(
-            embed_dim=emb_dim, 
-            num_heads=n_heads, 
-            dropout=dropout,
-            batch_first=True
+            embed_dim=emb_dim, num_heads=n_heads, dropout=dropout, batch_first=True
         )
 
-        # Output projection to MAXIMUM channel size
-        self.to_gamma_beta = nn.Sequential(
-            nn.LayerNorm(emb_dim),
-            nn.Linear(emb_dim, emb_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(emb_dim, 2 * max_channels),
+        # Shared components for all layers
+        self.shared_norm = nn.LayerNorm(emb_dim)
+
+        # Per-layer linear projections
+        self.layer_linears = nn.ModuleList(
+            [nn.Linear(emb_dim, emb_dim) for _ in range(n_layers)]
         )
+
+        # Shared components after layer-specific linear
+        self.shared_gelu = nn.GELU()
+        self.shared_dropout = nn.Dropout(dropout)
+        self.shared_output = nn.Linear(emb_dim, 2 * max_channels)
 
         # Initialize to identity (gamma≈1, beta≈0)
-        nn.init.zeros_(self.to_gamma_beta[-1].weight)
-        nn.init.constant_(self.to_gamma_beta[-1].bias[:max_channels], 0)  # β
-        nn.init.constant_(self.to_gamma_beta[-1].bias[max_channels:], 1)  # γ
+        nn.init.zeros_(self.shared_output.weight)
+        nn.init.constant_(self.shared_output.bias[:max_channels], 0)  # β
+        nn.init.constant_(self.shared_output.bias[max_channels:], 1)  # γ
 
     def compute_all_modulations(
-        self, 
-        original_img: torch.Tensor, 
+        self,
+        original_img: torch.Tensor,
         organ_id: torch.Tensor,
-        layer_configs: list[tuple[int, int]]
+        layer_configs: list[tuple[int, int]],
     ):
         """
         Compute gamma and beta for all layers at once.
-        
+
         Args:
             original_img: (B, 3, 256, 256) - original input image
             organ_id: (B,) - organ type IDs (if >= 0, use organ embedding)
             layer_configs: list of (layer_id, n_channels) tuples
-            
+
         Returns:
             dict: {layer_id: (gamma, beta)} where gamma/beta are (B, C, 1, 1)
         """
         B = original_img.shape[0]
-        
+
         # Get patch embeddings from original image (shared across all layers)
         patches = self.patch_embed(original_img)  # (B, N, D)
-        
+
         modulations = {}
-        
+
         for layer_id, n_channels in layer_configs:
             # Get layer embedding
             layer_emb = self.layer_embed(
                 torch.tensor([layer_id], device=original_img.device)
             )  # (1, D)
             layer_emb = layer_emb.expand(B, -1)  # (B, D)
-            
+
             # Determine query based on organ_id validity
-            if organ_id is not None and (organ_id >= 0).all():
-                # Cross-attention mode: organ + layer embedding
-                organ_emb = self.organ_embed(organ_id)  # (B, D)
-                queries = organ_emb + layer_emb  # (B, D)
-            else:
-                # Self-attention mode: pooled patches + layer embedding
-                # Global average pooling over all patches
-                patches_pooled = patches.mean(dim=1)  # (B, D)
-                queries = patches_pooled + layer_emb  # (B, D)
-            
-            queries = queries.unsqueeze(1)  # (B, 1, D)
-            
+            mask = organ_id >= 0  # [B]
+            q_org = self.organ_embed(
+                organ_id.clamp(min=0)
+            )  # [B, D] (dummy for unknown)
+            q_img = self.organ_embed(
+                torch.tensor(
+                    [self.organ_embed.weight.shape[0] - 1], device=original_img.device
+                ).expand(B)
+            )
+            q = torch.where(mask[:, None], q_org, q_img) + layer_emb  # [B, D]
+            queries = q[:, None, :]  # [B, 1, D] for attention
+
             # Prepend influence token
             influence_tokens = self.influence_token.expand(B, -1, -1)  # (B, 1, D)
             queries = torch.cat([influence_tokens, queries], dim=1)  # (B, 2, D)
-            
+
             # Attention
             attn_out, _ = self.attn(
                 query=queries,  # (B, 2, D)
-                key=patches,    # (B, N, D)
+                key=patches,  # (B, N, D)
                 value=patches,  # (B, N, D)
             )
-            
+
             # Average over query tokens
             attn_out = attn_out.mean(dim=1)  # (B, D)
-            
-            # Generate gamma and beta for maximum channels
-            gamma_beta = self.to_gamma_beta(attn_out)  # (B, 2 * max_channels)
+
+            # Generate gamma and beta using layer-specific linear
+            x = self.shared_norm(attn_out)
+            x = self.layer_linears[layer_id](x)  # Layer-specific transformation
+            x = self.shared_gelu(x)
+            x = self.shared_dropout(x)
+            gamma_beta = self.shared_output(x)  # (B, 2 * max_channels)
+
             beta_max, gamma_max = gamma_beta.chunk(2, dim=-1)  # each (B, max_channels)
-            
+
             # Adaptive pooling to target channel size
-            # beta_max = beta_max.unsqueeze(-1)  # (B, max_channels, 1)
-            # gamma_max = gamma_max.unsqueeze(-1)  # (B, max_channels, 1)
-            
-            beta = F.adaptive_avg_pool1d(beta_max, n_channels)  # (B, n_channels, 1)
-            gamma = F.adaptive_avg_pool1d(gamma_max, n_channels)  # (B, n_channels, 1)
-            
+            beta = F.adaptive_avg_pool1d(beta_max, n_channels)  # (B, n_channels)
+            gamma = F.adaptive_avg_pool1d(gamma_max, n_channels)  # (B, n_channels)
+
             # Reshape for broadcasting with (B, C, H, W)
-            beta = beta.unsqueeze(-1).unsqueeze(-1)   # (B, n_channels, 1, 1)
+            beta = beta.unsqueeze(-1).unsqueeze(-1)  # (B, n_channels, 1, 1)
             gamma = gamma.unsqueeze(-1).unsqueeze(-1)  # (B, n_channels, 1, 1)
-            
+
             modulations[layer_id] = (gamma, beta)
-        
+
         return modulations
 
 
@@ -227,9 +234,7 @@ class DownConvBlockFiLM(nn.Module):
             ]
         )
 
-        self.film_layers = nn.ModuleList(
-            [FiLMLayer() for _ in out_channels]
-        )
+        self.film_layers = nn.ModuleList([FiLMLayer() for _ in out_channels])
 
         self.pool = nn.MaxPool2d(2, 2)
 
@@ -240,7 +245,9 @@ class DownConvBlockFiLM(nn.Module):
             gammas: list of gamma tensors for each conv block
             betas: list of beta tensors for each conv block
         """
-        for conv, film, gamma, beta in zip(self.conv_blocks, self.film_layers, gammas, betas):
+        for conv, film, gamma, beta in zip(
+            self.conv_blocks, self.film_layers, gammas, betas
+        ):
             x = conv(x)
             x = film(x, gamma, beta)
         return self.pool(x), x
@@ -270,9 +277,7 @@ class UpConvBlockFiLM(nn.Module):
             ]
         )
 
-        self.film_layers = nn.ModuleList(
-            [FiLMLayer() for _ in out_channels]
-        )
+        self.film_layers = nn.ModuleList([FiLMLayer() for _ in out_channels])
 
         self.up_conv = up_conv
         if self.up_conv:
@@ -287,7 +292,9 @@ class UpConvBlockFiLM(nn.Module):
             gammas: list of gamma tensors for each conv block
             betas: list of beta tensors for each conv block
         """
-        for conv, film, gamma, beta in zip(self.conv_blocks, self.film_layers, gammas, betas):
+        for conv, film, gamma, beta in zip(
+            self.conv_blocks, self.film_layers, gammas, betas
+        ):
             x = conv(x)
             x = film(x, gamma, beta)
 
@@ -359,7 +366,7 @@ class UNet2DAttn(nn.Module):
             for i in range(depth):
                 if i >= self.attn_start:
                     n_attn_layers += 2  # decoder has 2 conv blocks per level
-            
+
             self.shared_attn = SharedAttnModulator(
                 n_organs=n_organs,
                 n_layers=n_attn_layers,
@@ -435,7 +442,7 @@ class UNet2DAttn(nn.Module):
             self.decoder["0"] = UpConvBlockFiLM(
                 [self.size * 4 + self.size * 2, self.size * 2],
                 [self.size * 2, self.size * 2],
-                up_conv = False
+                up_conv=False,
             )
         else:
             self.decoder["0"] = UpConvBlock(
@@ -508,7 +515,6 @@ class UNet2DAttn(nn.Module):
             print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
             self.distill_loss = DistillationLoss()
 
-
     def _build_layer_configs(self):
         """
         Build list of (layer_id, n_channels) for all layers that use attention.
@@ -571,17 +577,19 @@ class UNet2DAttn(nn.Module):
             modulations = self.shared_attn.compute_all_modulations(
                 original_img, organ_id, layer_configs
             )
-            
+
             # Convert to list for easy indexing
             mod_list = [modulations[i] for i in range(len(layer_configs))]
             mod_idx = 0
-        
+
         feat_list = []
 
         # Padding if needed
-        pre_padding = (x.size(-1) % 2**self.depth != 0) or (
-            x.size(-2) % 2**self.depth != 0
-        ) or (x.size(-3) % 2**self.depth != 0)
+        pre_padding = (
+            (x.size(-1) % 2**self.depth != 0)
+            or (x.size(-2) % 2**self.depth != 0)
+            or (x.size(-3) % 2**self.depth != 0)
+        )
         if pre_padding:
             x, pads = pad_to_2d(x, 2**self.depth)
             original_img, _ = pad_to_2d(original_img, 2**self.depth)
@@ -619,7 +627,7 @@ class UNet2DAttn(nn.Module):
         # Decoder
         for key in self.decoder:
             concat_feat = torch.cat((out, feat_list[int(key)]), dim=1)
-            
+
             if isinstance(self.decoder[key], UpConvBlockFiLM):
                 gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
                 betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
@@ -627,7 +635,7 @@ class UNet2DAttn(nn.Module):
                 out = self.decoder[key](concat_feat, gammas, betas)
             else:
                 out = self.decoder[key](concat_feat)
-            
+
             del feat_list[int(key)]
 
         # Output
@@ -679,7 +687,7 @@ class UNet2DAttn(nn.Module):
                     },
                     commit=False,
                 )
-            
+
             loss = loss + distill_loss_emb["loss"]
 
         return {
