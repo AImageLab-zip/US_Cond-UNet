@@ -125,7 +125,7 @@ def train(args: Namespace):
         train_dataset, val_dataset = build_train_val_datasets(DATA_DIR, args, seed=42, get_sft_transforms_ = get_sft_transforms)
 
         train_syn_dataset = USdatasetOmni(
-            "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+            "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
             "train",
             transforms=get_sft_transforms(train=True),
             data_type=args.dataset_type,

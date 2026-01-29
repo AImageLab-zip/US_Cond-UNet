@@ -96,7 +96,7 @@ def train(args: Namespace):
             DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
         )
         # train_syn_dataset = USdatasetOmni(
-        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
         #     transforms=get_sft_transforms(train=True),
         #     data_type=args.dataset_type,
@@ -134,7 +134,7 @@ def train(args: Namespace):
         )
 
         # train_syn_dataset = USdatasetOmni(
-        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
         #     transforms=get_sft_transforms(train=True),
         #     data_type=args.dataset_type,
@@ -161,7 +161,7 @@ def train(args: Namespace):
             id_dropout=0.0,
         )
         # train_dataset, val_dataset = build_train_val_datasets(
-        #     "/work/tesi_nmorelli/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
+        #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     args,
         #     seed=args.seed,
         #     id_file_name="train",

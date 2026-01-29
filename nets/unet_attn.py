@@ -617,7 +617,7 @@ class UNet2DAttn(nn.Module):
                 freeze_image_encoder=0,
             )
             state_dict = load_file(
-                "/work/tesi_nmorelli/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
+                "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
             )
             self.distill_model.load_state_dict(state_dict)
             load_result = self.distill_model.load_state_dict(state_dict)
