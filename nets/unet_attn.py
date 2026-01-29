@@ -16,6 +16,10 @@ from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt, DistillationLoss
 from safetensors.torch import load_file
 from utils.paths import *
 from torchvision.transforms import v2
+import ptwt  # pytorch_wavelets
+import torch
+import torch.nn as nn
+from einops import rearrange
 
 
 class PatchEmbed(nn.Module):
@@ -45,6 +49,100 @@ class PatchEmbed(nn.Module):
         x = x + self.pos_embed  # Add positional encoding
         return x
 
+import ptwt
+import torch
+import torch.nn as nn
+from einops import rearrange
+
+class DWTPatchEmbed(nn.Module):
+    """
+    Apply DWT and create patch embeddings from subbands.
+    Interface matches PatchEmbed to minimize changes to SharedAttnModulator.
+    
+    DWT decomposes (B, C, H, W) into:
+    - LL: Low-freq approximation (B, C, H/2, W/2)
+    - LH, HL, HH: High-freq details (B, C, H/2, W/2 each)
+    """
+    def __init__(self, img_size=256, patch_size=8, in_channels=3, embed_dim=256,
+                 wavelet='haar', mode='zero'):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.wavelet = wavelet
+        self.mode = mode
+        
+        # After 1-level DWT, each subband is img_size/2
+        dwt_size = img_size // 2  # 128 for img_size=256
+        
+        # Number of patches per subband
+        patches_per_dim = dwt_size // patch_size  # 128/8 = 16
+        n_patches_per_band = patches_per_dim ** 2  # 256
+        
+        # Total patches: 4 subbands × n_patches_per_band
+        self.n_patches = 4 * n_patches_per_band
+        
+        # Separate projections for each subband
+        self.proj_LL = nn.Conv2d(in_channels, embed_dim, 
+                                 kernel_size=patch_size, stride=patch_size)
+        self.proj_LH = nn.Conv2d(in_channels, embed_dim,
+                                 kernel_size=patch_size, stride=patch_size)
+        self.proj_HL = nn.Conv2d(in_channels, embed_dim,
+                                 kernel_size=patch_size, stride=patch_size)
+        self.proj_HH = nn.Conv2d(in_channels, embed_dim,
+                                 kernel_size=patch_size, stride=patch_size)
+        
+        # Shared positional encoding for all patches
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        
+        # Learnable subband type embeddings
+        self.subband_type_embed = nn.Parameter(torch.zeros(4, embed_dim))
+        nn.init.trunc_normal_(self.subband_type_embed, std=0.02)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W) - input image
+        Returns:
+            patches: (B, N, D) where N = 4 * (H/2/patch_size)^2
+        """
+        B, C, H, W = x.shape
+        
+        # Apply DWT using ptwt - correct API
+        # wavedec2 returns coefficients in format: [LL, (LH, HL, HH)]
+        coeffs = ptwt.wavedec2(x, wavelet=self.wavelet, mode=self.mode, level=1)
+        
+        # Extract subbands
+        # coeffs[0] is LL (approximation)
+        # coeffs[1] is tuple of (LH, HL, HH) detail coefficients
+        LL = coeffs[0]  # (B, C, H/2, W/2)
+        LH, HL, HH = coeffs[1]  # Each (B, C, H/2, W/2)
+        
+        # Project each subband to patches
+        patches_LL = self.proj_LL(LL)  # (B, embed_dim, H/2/P, W/2/P)
+        patches_LH = self.proj_LH(LH)
+        patches_HL = self.proj_HL(HL)
+        patches_HH = self.proj_HH(HH)
+        
+        # Reshape to (B, n_patches_per_band, embed_dim)
+        patches_LL = rearrange(patches_LL, 'b d h w -> b (h w) d')
+        patches_LH = rearrange(patches_LH, 'b d h w -> b (h w) d')
+        patches_HL = rearrange(patches_HL, 'b d h w -> b (h w) d')
+        patches_HH = rearrange(patches_HH, 'b d h w -> b (h w) d')
+        
+        # Add subband type embeddings (broadcast across batch and patches)
+        patches_LL = patches_LL + self.subband_type_embed[0]
+        patches_LH = patches_LH + self.subband_type_embed[1]
+        patches_HL = patches_HL + self.subband_type_embed[2]
+        patches_HH = patches_HH + self.subband_type_embed[3]
+        
+        # Concatenate all subbands: (B, 4*n_patches_per_band, embed_dim)
+        patches = torch.cat([patches_LL, patches_LH, patches_HL, patches_HH], dim=1)
+        
+        # Add positional encoding
+        patches = patches + self.pos_embed
+        
+        return patches
 
 class FiLMLayer(nn.Module):
     """Simple FiLM layer that applies gamma * x + beta modulation"""
@@ -81,19 +179,29 @@ class SharedAttnModulator(nn.Module):
         emb_dim: int = 256,
         n_heads: int = 8,
         dropout: float = 0.1,
+        use_dwt: bool = True,
+        wavelet: str = "haar",
     ):
         super().__init__()
         self.emb_dim = emb_dim
         self.n_layers = n_layers
         self.max_channels = max_channels
 
-        # Patch embedding with positional encoding
-        self.patch_embed = PatchEmbed(
-            img_size=img_size,
-            patch_size=patch_size,
-            in_channels=img_channels,
-            embed_dim=emb_dim,
-        )
+        if use_dwt:
+            self.patch_embed = DWTPatchEmbed(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_channels=img_channels,
+                embed_dim=emb_dim,
+                wavelet=wavelet,
+            )
+        else:
+            self.patch_embed = PatchEmbed(
+                img_size=img_size,
+                patch_size=patch_size,
+                in_channels=img_channels,
+                embed_dim=emb_dim,
+            )
 
         # Organ embedding
         self.organ_embed = nn.Embedding(
@@ -324,6 +432,8 @@ class UNet2DAttn(nn.Module):
         emb_dim: int = 256,
         n_heads: int = 8,
         distill: bool = False,
+        use_dwt: bool = True,
+        wavelet: str = "haar",
     ):
         """
         Args:
@@ -375,6 +485,8 @@ class UNet2DAttn(nn.Module):
                 patch_size=patch_size,
                 emb_dim=emb_dim,
                 n_heads=n_heads,
+                use_dwt=use_dwt,
+                wavelet=wavelet,
             )
 
         # ---------------- Encoder ----------------

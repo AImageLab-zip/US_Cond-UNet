@@ -27,6 +27,7 @@ from pathlib import Path
 import pickle
 from accelerate import Accelerator
 from utils.sampler import BalancedHierarchicalSampler
+from transformers import TrainerCallback
 
 def compute_metrics(eval_pred):
     logits, _ = eval_pred
@@ -116,7 +117,7 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             include_testicles=True,
-            id_dropout=0.0
+            id_dropout=0.0,
         )
     else:
         train_dataset = USdatasetOmni(
@@ -129,7 +130,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             include_testicles=True,
-            id_dropout=args.id_dropout
+            id_dropout=args.id_dropout,
         )
 
         # train_syn_dataset = USdatasetOmni(
@@ -182,11 +183,11 @@ def train(args: Namespace):
         f"Train dataset size: {len(train_dataset)}, Val dataset size: {len(val_dataset)}, Test dataset size: {len(test_dataset)}"
     )
     train_sampler = BalancedHierarchicalSampler(
-            dataset=train_dataset,
-            batch_size=args.batch_size,
-            steps_per_epoch=int(args.epochs / 50),
-            seed=args.seed,
-        )
+        dataset=train_dataset,
+        batch_size=args.batch_size,
+        steps_per_epoch=int(args.epochs / 50),
+        seed=args.seed,
+    )
     accelerator = Accelerator()
 
     if accelerator.is_main_process:
@@ -244,18 +245,23 @@ def train(args: Namespace):
             n_organs=len(organ_to_class_dict),
             size=32,
             depth=args.unet_depth,
-            attn_start=args.film_start,      # Start attention from first level
-            use_attn=args.use_film,     # Enable attention
-            img_size=512,      # Input image size
-            patch_size=8,     # 16×16 patches → 256 patches total
-            emb_dim=768,       # Embedding dimension
-            n_heads=8,        # Number of attention heads
+            attn_start=args.film_start,  # Start attention from first level
+            use_attn=args.use_film,  # Enable attention
+            img_size=512,  # Input image size
+            patch_size=8,  # 16×16 patches → 256 patches total
+            emb_dim=768,  # Embedding dimension
+            n_heads=8,  # Number of attention heads
             # n_transformer_layers = 12,
-            distill = bool(args.distill)
+            distill=bool(args.distill),
+            use_dwt=args.use_dwt,
+            wavelet=args.wavelet,
         )
 
     # Generate custom hashed directory name
-    run_hash = generate_run_hash(args)
+    if args.resume == None:
+        run_hash = generate_run_hash(args)
+    else:
+        run_hash = f"./loggings/{args.resume}"
     output_dir = f"{run_hash}"
     print(f"Saving results to: {output_dir}")
 
@@ -278,7 +284,7 @@ def train(args: Namespace):
         report_to=["wandb"] if args.wandb_project else None,
         run_name=args.wandb_run_name,
         dataloader_num_workers=args.num_workers,
-        dataloader_persistent_workers=True,  
+        dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=20,
         logging_steps=10,
@@ -302,7 +308,7 @@ def train(args: Namespace):
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
         train_sampler=train_sampler,
-
+        callbacks=[DistillScheduleCallback(args.distill)]
     )
     # trainer = CustomTrainerWithSampler(
     #     model=model,
@@ -311,7 +317,7 @@ def train(args: Namespace):
     #     eval_dataset=dataset,
     #     compute_metrics=compute_metrics,
     # )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=(args.resume != None) )
     trainer.evaluate()
 
     predictions = trainer.predict(test_dataset=test_dataset)
@@ -322,11 +328,11 @@ class CustomTrainerWithSampler(Trainer):
     """
     Custom Trainer that uses BalancedHierarchicalSampler for training.
     """
-    
+
     def __init__(self, *args, train_sampler=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.train_sampler = train_sampler
-    
+
     def get_train_dataloader(self):
         """
         Override to use our custom batch sampler.
@@ -334,7 +340,7 @@ class CustomTrainerWithSampler(Trainer):
         if self.train_sampler is None:
             # Fallback to default behavior
             return super().get_train_dataloader()
-        
+
         # Create DataLoader with our batch sampler
         return DataLoader(
             self.train_dataset,
@@ -342,5 +348,24 @@ class CustomTrainerWithSampler(Trainer):
             num_workers=self.args.dataloader_num_workers,
             pin_memory=self.args.dataloader_pin_memory,
             persistent_workers=self.args.dataloader_persistent_workers,
-            prefetch_factor=self.args.dataloader_prefetch_factor if self.args.dataloader_num_workers > 0 else None,
+            prefetch_factor=(
+                self.args.dataloader_prefetch_factor
+                if self.args.dataloader_num_workers > 0
+                else None
+            ),
         )
+
+
+class DistillScheduleCallback(TrainerCallback):
+    def __init__(self, stop_step):
+        self.stop_step = stop_step
+        print(f"Distillation will only be applied for the first {stop_step} steps")
+    def on_step_begin(self, args, state, control, **kwargs):
+        if self.stop_step is None:
+            return
+        model = kwargs["model"]
+        if model.distill != (state.global_step < self.stop_step):
+            print("----------------DISTILLATION STOPPED-----------------")
+
+        model.distill = state.global_step < self.stop_step
+        

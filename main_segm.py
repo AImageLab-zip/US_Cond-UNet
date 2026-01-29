@@ -141,6 +141,16 @@ def parse_args():
         type=int,
         default=0,
     )
+    parser.add_argument(
+        "--use_dwt",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--wavelet",
+        type=str,
+        default='haar',
+    )
     # -----------------------------------------------
     # |         Optim & Scheduler Config            |
     # -----------------------------------------------
@@ -240,6 +250,12 @@ def parse_args():
         type=int,
         default=0,
         help="to use if want to finetune on synthetic testicle dataset",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="",
     )
     args = parser.parse_args()
     return args
