@@ -116,7 +116,7 @@ def train(args: Namespace):
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
-            include_testicles=True,
+            skip_dataset=args.val_skip_dataset,
             id_dropout=0.0,
         )
     else:
@@ -129,7 +129,6 @@ def train(args: Namespace):
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
-            include_testicles=True,
             id_dropout=args.id_dropout,
         )
 
@@ -226,19 +225,7 @@ def train(args: Namespace):
             freeze_image_encoder=args.freeze_image_encoder,
         )
 
-    else:
-        # model = UNet2DFiLM(
-        #     in_channels=3,
-        #     num_classes=1,
-        #     n_organs=len(organ_to_class_dict) ,
-        #     size=32,
-        #     depth=args.unet_depth,
-        #     film_start=args.film_start,
-        #     use_film=args.use_film,
-        #     film_embed=args.film_embed,
-        #     distill = bool(args.distill)
-        # )
-
+    elif args.unet_attn:
         model = UNet2DAttn(
             in_channels=3,
             num_classes=1,
@@ -256,6 +243,18 @@ def train(args: Namespace):
             use_dwt=args.use_dwt,
             wavelet=args.wavelet,
         )
+    else:
+        model = UNet2DFiLM(
+            in_channels=3,
+            num_classes=1,
+            n_organs=len(organ_to_class_dict) ,
+            size=32,
+            depth=args.unet_depth,
+            film_start=args.film_start,
+            use_film=args.use_film,
+            distill = bool(args.distill)
+        )
+
 
     # Generate custom hashed directory name
     if args.resume == None:

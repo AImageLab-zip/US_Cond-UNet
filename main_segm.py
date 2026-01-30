@@ -89,6 +89,16 @@ def parse_args():
         type=float,
         default=0.0,
     )
+    parser.add_argument(
+        "--train-skip-dataset",
+        type=str,
+        default="",
+    )
+    parser.add_argument(
+        "--val-skip-dataset",
+        type=str,
+        default="",
+    )
     # -----------------------------------------------
     # |                 SEGM Config                 |
     # -----------------------------------------------
@@ -105,6 +115,9 @@ def parse_args():
     ) 
     parser.add_argument(
         "--unet-depth", help="number of stage in the uner", type=int, default=5
+    )
+    parser.add_argument(
+        "--unet-attn", help="", type=int, default=0
     )
     parser.add_argument(
         "--use-medsam",
@@ -142,7 +155,7 @@ def parse_args():
         default=0,
     )
     parser.add_argument(
-        "--use_dwt",
+        "--use-dwt",
         type=int,
         default=0,
     )

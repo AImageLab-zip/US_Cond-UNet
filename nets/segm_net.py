@@ -141,7 +141,7 @@ class FiLM2d(nn.Module):
     ):
         super().__init__()
         hidden = hidden or 2 * in_channels
-        self.embed = nn.Embedding(n_organs, emb_dim)
+        self.embed = nn.Embedding(n_organs+1, emb_dim)
 
         self.mlp = nn.Sequential(
             nn.Linear(emb_dim, hidden),
@@ -159,7 +159,16 @@ class FiLM2d(nn.Module):
         x : (B, C, H, W)
         organ_id : (B,) integer 0…n_organs-1
         """
-        beta_gamma = self.mlp(self.embed(organ_id))  # (B, 2C)
+        B = x.shape[0]
+        mask = organ_id >= 0  # [B]
+        q_org = self.embed(organ_id.clamp(min=0))  # [B, D] (dummy for unknown)
+        q_img = self.embed(
+            torch.tensor(
+                [self.embed.weight.shape[0] - 1], device=x.device
+            ).expand(B)
+        )
+        q = torch.where(mask[:, None], q_org, q_img)
+        beta_gamma = self.mlp(q)  # (B, 2C)
         beta, gamma = beta_gamma.chunk(2, dim=-1)  # each (B, C)
         beta = beta.unsqueeze(-1).unsqueeze(-1)
         gamma = gamma.unsqueeze(-1).unsqueeze(-1)
@@ -645,7 +654,7 @@ class UNet2DFiLM(nn.Module):
                     },
                     commit=False,
                 )
-            loss = loss + (distill_loss_emb["loss"] + distill_loss_logits['loss'])/2
+            loss = loss + (distill_loss_emb["loss"] + distill_loss_logits["loss"]) / 2
 
         return {
             "loss": loss,

@@ -61,8 +61,8 @@ dataset_to_organ_dict = {
     "private_Kidney": "kidney",
     "Fatty-Liver": "liver",
     "private_Liver": "liver",
-    "private_Testicle": "unknown",
-    "public_Testicle_syn": "unknown",
+    "private_Testicle": "testicle",
+    "public_Testicle_syn": "testicle",
 }
 dataset_for_classification = [
     "Appendix",

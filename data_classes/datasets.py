@@ -26,21 +26,6 @@ import numpy as np
 import pickle
 from typing import Literal, Optional, Union
 
-class ImageDataset(Dataset):
-    def __init__(self, items, processor):
-        self.items = items
-        self.processor = processor
-    
-    def __len__(self):
-        return len(self.items)
-    
-    def __getitem__(self, idx):
-        item = self.items[idx]
-        image = load_image(item['image_path'])
-        inputs = self.processor(images=image, return_tensors="pt")
-        # Remove batch dimension added by processor
-        return {k: v.squeeze(0) for k, v in inputs.items()}, idx
-
 def collate_fn(batch):
     """Custom collate to handle variable-sized inputs"""
     inputs_list, indices = zip(*batch)
@@ -62,8 +47,7 @@ class USdatasetOmni(Dataset):
         ccl_crop=False,
         keep_aspect_ratio=True,
         self_norm=False,
-        include_testicles=False,
-        testicle_split="",
+        skip_dataset = "",
         id_dropout: float = 0.0,
     ):
         base_dir = Path(base_dir)
@@ -74,6 +58,7 @@ class USdatasetOmni(Dataset):
         self.ccl_crop = ccl_crop
         self.keep_aspect_ratio = keep_aspect_ratio
         self.self_norm = self_norm
+        self.skip_dataset = skip_dataset
         self.id_dropout = id_dropout  
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
@@ -89,53 +74,21 @@ class USdatasetOmni(Dataset):
             .expand(3, out_size, out_size)
         )
         self.items = []
-        self.label_dict = {
-            # 0: appendix
-            0: ["Appendix", "appendix", "Vermiform appendix", "vermiform appendix"],
-            # 1: breast
-            1: ["Breast", "breast", "Mammary gland", "mammary gland"],
-            # 2: cardiac (related to the heart)
-            2: ["Cardiac", "cardiac", "Heart", "heart"],
-            # 3: thyroid
-            3: ["Thyroid", "thyroid", "Thyroid gland", "thyroid gland"],
-            # 4: fetal (related to the fetus)
-            4: ["Fetal", "fetal", "Fetus", "fetus"],
-            # 5: kidney
-            5: ["Kidney", "kidney", "Renal", "renal"],
-            # 6: liver
-            6: ["Liver", "liver", "Hepatic", "hepatic"],
-            # 7: testicles
-            7: [
-                "Testicles",
-                "testicles",
-                "Testicle",
-                "testicle",
-                "Testis",
-                "testis",
-                "Testes",
-            ],
-            # 8: breast_luminal
-            8: [
-                "Breast Luminal",
-                "breast luminal",
-                "Luminal Breast",
-                "luminal breast",
-                "breast_luminal",
-            ],
-        }
         for dataset_dir in base_dir.iterdir():
             if dataset_dir.name in self.dataset_list:
                 continue
             elif (
                 Path(dataset_dir, split + ".txt").is_file()
-                or Path(dataset_dir, split + f"{testicle_split}.txt").is_file()
-            ):
-                if "Testicle" in dataset_dir.name and not include_testicles:
+            ):  
+                if self.skip_dataset == "":
+                    list_path = Path(dataset_dir, f"{split}.txt")
+                elif self.skip_dataset in dataset_dir.name and 'train' in split:
                     continue
-                elif "Testicle" in dataset_dir.name and include_testicles:
-                    list_path = Path(dataset_dir, split + f"{testicle_split}.txt")
+                elif self.skip_dataset in dataset_dir.name and 'train' not in split:
+                    list_path = Path(dataset_dir, f"{split}.txt")
                 else:
-                    list_path = Path(dataset_dir, split + ".txt")
+                    list_path = Path(dataset_dir, f"{split}.txt")
+                
                 self.dataset_list.append(dataset_dir.name)
                 with open(list_path, "r") as f:
 
@@ -283,10 +236,14 @@ class USdatasetOmni(Dataset):
             unormalized_bbox_coords = torch.tensor(
                 [-100, -100, -100, -100], dtype=torch.float32
             ).unsqueeze(0)
+        
         organ_id = organ_to_class_dict[item["organ_label"]]
         if self.id_dropout != 0.0 and random.random() < self.id_dropout:
             organ_id = organ_to_class_dict['unknown']
         
+        if self.skip_dataset != "" and self.skip_dataset in item["image_path"]:
+            organ_id = organ_to_class_dict['unknown']
+
         return {
             "pixel_values": image.to(torch.float),
             "organ_id": organ_id,

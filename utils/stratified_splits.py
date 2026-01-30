@@ -65,7 +65,7 @@ def build_train_val_datasets(
         out_size=args.dataset_size,
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
-        include_testicles=False,
+        skip_dataset=args.train_skip_dataset,
         id_dropout=args.id_dropout
     )
 
