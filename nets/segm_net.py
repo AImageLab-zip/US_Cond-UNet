@@ -435,35 +435,7 @@ class UNet2DFiLM(nn.Module):
 
             # Calculate upsampling factor
             spatial_factor = target_spatial // student_spatial
-
-            if spatial_factor > 1:
-                # Need upsampling
-                self.distill_upconv = nn.ConvTranspose2d(
-                    student_channels,
-                    target_channels,
-                    kernel_size=3,
-                    stride=spatial_factor,
-                    padding=1,
-                    output_padding=spatial_factor - 1,
-                )
-            elif spatial_factor == 1:
-                # Same spatial size, just adjust channels
-                self.distill_upconv = nn.Conv2d(
-                    student_channels, target_channels, kernel_size=1
-                )
-            else:
-                # Need downsampling
-                downsample_factor = student_spatial // target_spatial
-                self.distill_upconv = nn.Sequential(
-                    nn.Conv2d(
-                        student_channels,
-                        target_channels,
-                        kernel_size=3,
-                        stride=downsample_factor,
-                        padding=1,
-                    )
-                )
-
+            self.distill_adapter = nn.Conv2d(student_channels, target_channels, kernel_size=1)
             sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
             self.distill_model = MedSAM(
                 image_encoder=deepcopy(sam_model.image_encoder),
@@ -634,7 +606,13 @@ class UNet2DFiLM(nn.Module):
                     multimask_output=False,
                 )
 
-            up_feat = self.distill_upconv(out_bottleneck)
+            student_resized = nn.functional.interpolate(
+                out_bottleneck,
+                size=(image_embedding.shape[-1], image_embedding.shape[-1]),
+                mode="bilinear",
+                align_corners=False,
+            )
+            up_feat = self.distill_adapter(student_resized)
             distill_loss_emb = self.distill_loss(
                 student_logits=up_feat, teacher_logits=image_embedding
             )
@@ -826,36 +804,47 @@ class DistillationLoss(nn.Module):
         self.alpha = alpha  # Weight between cosine and MSE
         self.use_l1 = use_l1
 
-    def forward(self, student_logits, teacher_logits):
+    def forward(self, student_logits, teacher_logits, tau = 0.7):
         """
         Args:
             student_logits: (B, D) - student features
             teacher_logits: (B, D) - teacher features
         """
-        # Normalize features for stable training
-        student_norm = F.normalize(student_logits, p=2, dim=1)
-        teacher_norm = F.normalize(teacher_logits, p=2, dim=1)
+        # # Normalize features for stable training
+        # student_norm = F.normalize(student_logits, p=2, dim=1)
+        # teacher_norm = F.normalize(teacher_logits, p=2, dim=1)
 
-        # Cosine similarity loss (encourages directional alignment)
-        cosine_loss = (
-            1 - F.cosine_similarity(student_logits, teacher_logits, dim=1).mean()
-        )
+        # # Cosine similarity loss (encourages directional alignment)
+        # cosine_loss = (
+        #     1 - F.cosine_similarity(student_logits, teacher_logits, dim=1).mean()
+        # )
 
-        # MSE loss on normalized features (encourages magnitude alignment)
-        mse_loss = F.mse_loss(student_norm, teacher_norm)
+        # # MSE loss on normalized features (encourages magnitude alignment)
+        # mse_loss = F.mse_loss(student_norm, teacher_norm)
 
-        # Combined loss
-        loss = self.alpha * cosine_loss + (1 - self.alpha) * mse_loss
+        # # Combined loss
+        # loss = self.alpha * cosine_loss + (1 - self.alpha) * mse_loss
 
-        # Optional L1 for sparsity
-        if self.use_l1:
-            l1_loss = F.l1_loss(student_logits, teacher_logits)
-            loss = loss + 0.1 * l1_loss
+        # # Optional L1 for sparsity
+        # if self.use_l1:
+        #     l1_loss = F.l1_loss(student_logits, teacher_logits)
+        #     loss = loss + 0.1 * l1_loss
 
+        B = student_logits.size(0)
+
+        s = student_logits.flatten(start_dim=1)
+        t = teacher_logits.flatten(start_dim=1).detach()
+
+        s = F.normalize(s, dim=-1)
+        t = F.normalize(t, dim=-1)
+
+        d2 = (s[:, None, :] - t[None, :, :]).pow(2).sum(dim=-1)
+        logits = -d2 / tau
+        labels = torch.arange(B, device=s.device)
+
+        loss = F.cross_entropy(logits, labels)
         return {
             "loss": loss,
-            "cosine_loss": cosine_loss.item(),
-            "mse_loss": mse_loss.item(),
         }
 
 
