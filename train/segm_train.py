@@ -363,8 +363,9 @@ class DistillScheduleCallback(TrainerCallback):
         if self.stop_step is None:
             return
         model = kwargs["model"]
-        if model.distill != (state.global_step < self.stop_step):
-            print("----------------DISTILLATION STOPPED-----------------")
+        if hasattr(model, "distill"):
+            if model.distill != (state.global_step < self.stop_step):
+                print("----------------DISTILLATION STOPPED-----------------")
 
-        model.distill = state.global_step < self.stop_step
+            model.distill = state.global_step < self.stop_step
         
