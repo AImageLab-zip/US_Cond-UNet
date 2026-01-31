@@ -580,51 +580,26 @@ class UNet2DAttn(nn.Module):
             # Calculate upsampling factor
             spatial_factor = target_spatial // student_spatial
 
-            if spatial_factor > 1:
-                # Need upsampling
-                self.distill_upconv = nn.ConvTranspose2d(
-                    student_channels,
-                    target_channels,
-                    kernel_size=3,
-                    stride=spatial_factor,
-                    padding=1,
-                    output_padding=spatial_factor - 1,
-                )
-            elif spatial_factor == 1:
-                # Same spatial size, just adjust channels
-                self.distill_upconv = nn.Conv2d(
-                    student_channels, target_channels, kernel_size=1
-                )
-            else:
-                # Need downsampling
-                downsample_factor = student_spatial // target_spatial
-                self.distill_upconv = nn.Sequential(
-                    nn.Conv2d(
-                        student_channels,
-                        target_channels,
-                        kernel_size=3,
-                        stride=downsample_factor,
-                        padding=1,
-                    )
-                )
+            self.distill_adapter = nn.Conv2d(student_channels, target_channels, kernel_size=1)
 
-            sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-            self.distill_model = MedSAM(
-                image_encoder=deepcopy(sam_model.image_encoder),
-                mask_decoder=deepcopy(sam_model.mask_decoder),
-                prompt_encoder=deepcopy(sam_model.prompt_encoder),
-                predict_bboxes=True,
-                freeze_image_encoder=0,
-            )
-            state_dict = load_file(
-                "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
-            )
-            self.distill_model.load_state_dict(state_dict)
-            load_result = self.distill_model.load_state_dict(state_dict)
-            for p in self.distill_model.parameters():
-                p.requires_grad = False
-            self.distill_model.eval()
-            print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
+
+            # sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
+            # self.distill_model = MedSAM(
+            #     image_encoder=deepcopy(sam_model.image_encoder),
+            #     mask_decoder=deepcopy(sam_model.mask_decoder),
+            #     prompt_encoder=deepcopy(sam_model.prompt_encoder),
+            #     predict_bboxes=True,
+            #     freeze_image_encoder=0,
+            # )
+            # state_dict = load_file(
+            #     "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
+            # )
+            # self.distill_model.load_state_dict(state_dict)
+            # load_result = self.distill_model.load_state_dict(state_dict)
+            # for p in self.distill_model.parameters():
+            #     p.requires_grad = False
+            # self.distill_model.eval()
+            # print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
             self.distill_loss = DistillationLoss()
 
     def _build_layer_configs(self):
@@ -763,28 +738,20 @@ class UNet2DAttn(nn.Module):
             loss = 0.0
 
         if self.distill:
-            with torch.no_grad():
-                self.distill_model.eval()
-                up_pixel_values = v2.functional.resize(
-                    pixel_values, 1024, v2.InterpolationMode.BICUBIC
-                )
-                image_embedding = self.distill_model.image_encoder(up_pixel_values)
-                image_pe = self.distill_model.prompt_encoder.get_dense_pe()
-                # Decode mask
-                low_res_masks, _ = self.distill_model.mask_decoder(
-                    image_embeddings=image_embedding,  # (B, 256, 64, 64)
-                    image_pe=image_pe,  # (1, 256, 64, 64)
-                    sparse_prompt_embeddings=self.distill_model.learned_sparse_embeddings,  # (B, 2, 256)
-                    dense_prompt_embeddings=self.distill_model.learned_dense_embeddings,  # (B, 256, 64, 64)
-                    multimask_output=False,
-                )
+            teacher_embedding = kwargs.get("teacher_embedding")
+            teacher_mask = kwargs.get("teacher_mask")
+            image_embedding = teacher_embedding.to(out.device)
+            mid_res_masks = teacher_mask.to(out.device)
 
-            up_feat = self.distill_upconv(out_bottleneck)
+            student_resized = nn.functional.interpolate(
+                out_bottleneck,
+                size=(image_embedding.shape[-1], image_embedding.shape[-1]),
+                mode="bilinear",
+                align_corners=False,
+            )
+            up_feat = self.distill_adapter(student_resized)
             distill_loss_emb = self.distill_loss(
                 student_logits=up_feat, teacher_logits=image_embedding
-            )
-            mid_res_masks = v2.functional.resize(
-                low_res_masks, 512, v2.InterpolationMode.BICUBIC
             )
             distill_loss_logits = self.distill_loss(
                 student_logits=out, teacher_logits=mid_res_masks.squeeze(1)

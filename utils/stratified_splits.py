@@ -66,7 +66,9 @@ def build_train_val_datasets(
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
         skip_dataset=args.train_skip_dataset,
-        id_dropout=args.id_dropout
+        id_dropout=args.id_dropout,
+        teacher_cache_dir = '/work/phd_ultrasounds/UUSIC_new/datasets/medsam_cache/train'
+
     )
 
     # 2) Get reproducible stratified indices (80/20)

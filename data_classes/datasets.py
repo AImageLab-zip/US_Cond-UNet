@@ -26,15 +26,7 @@ import numpy as np
 import pickle
 from typing import Literal, Optional, Union
 
-def collate_fn(batch):
-    """Custom collate to handle variable-sized inputs"""
-    inputs_list, indices = zip(*batch)
-    # Stack inputs
-    batched_inputs = {
-        key: torch.stack([inp[key] for inp in inputs_list])
-        for key in inputs_list[0].keys()
-    }
-    return batched_inputs, list(indices)
+
 
 class USdatasetOmni(Dataset):
     def __init__(
@@ -49,6 +41,7 @@ class USdatasetOmni(Dataset):
         self_norm=False,
         skip_dataset = "",
         id_dropout: float = 0.0,
+        teacher_cache_dir: Optional[Union[str, Path]] = None,
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -60,11 +53,13 @@ class USdatasetOmni(Dataset):
         self.self_norm = self_norm
         self.skip_dataset = skip_dataset
         self.id_dropout = id_dropout  
+        self.base_dir = base_dir
+        self.teacher_cache_dir = Path(teacher_cache_dir) if teacher_cache_dir else None
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
         self.mean = (
-            torch.Tensor([123.675, 116.28, 103.53])
+            torch.Tensor([127.5,127.5,127.5])
             .view(3, 1, 1)
             .expand(3, out_size, out_size)
         )
@@ -219,9 +214,6 @@ class USdatasetOmni(Dataset):
             if mask.max() > 1.0:
                 mask = mask / 255.0
 
-        if self.self_norm:
-            image = (image * self.std) + self.mean
-            image = self.normalize_tensor_zscore_ignore_black(image)
 
         if len(mask.shape) < 3:
             mask = mask.unsqueeze(0)
@@ -244,7 +236,7 @@ class USdatasetOmni(Dataset):
         if self.skip_dataset != "" and self.skip_dataset in item["image_path"]:
             organ_id = organ_to_class_dict['unknown']
 
-        return {
+        sample = {
             "pixel_values": image.to(torch.float),
             "organ_id": organ_id,
             "labels": item["multi_cls_label"],
@@ -253,35 +245,16 @@ class USdatasetOmni(Dataset):
             "organ_id_metric": organ_id,
         }
 
-    def normalize_tensor_zscore_ignore_black(
-        self, tensor: torch.Tensor, epsilon: float = 1e-8
-    ):
-        """
-        Z-score normalize a tensor, ignoring black pixels.
+        if self.teacher_cache_dir is not None:
+            image_path = Path(item["image_path"])
+            try:
+                rel = image_path.relative_to(self.base_dir)
+            except ValueError:
+                rel = Path(image_path.parent.name) / image_path.name
+            cache_path = (self.teacher_cache_dir / rel).with_suffix(".pt")
+            if cache_path.is_file():
+                cached = torch.load(cache_path, map_location="cpu")
+                sample["teacher_embedding"] = cached.get("image_embedding")
+                sample["teacher_mask"] = cached.get("mid_res_masks")
 
-        Returns:
-            Normalized tensor with mean≈0, std≈1 for non-black pixels
-        """
-
-        if tensor.dim() == 2:
-            mask = tensor > 0
-        elif tensor.dim() == 3:
-            mask = (
-                (tensor > 0).any(dim=0)
-                if tensor.shape[0] in [1, 3]
-                else (tensor > 0).any(dim=-1)
-            )
-
-        if mask.any():
-            valid_pixels = tensor[mask] if tensor.dim() == 2 else tensor[:, mask]
-            mean_val = valid_pixels.mean()
-            std_val = valid_pixels.std()
-
-            if std_val > epsilon:
-                normalized = (tensor - mean_val) / std_val
-            else:
-                normalized = tensor - mean_val
-        else:
-            normalized = tensor.clone()
-
-        return normalized
+        return sample
