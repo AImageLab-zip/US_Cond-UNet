@@ -141,7 +141,7 @@ class FiLM2d(nn.Module):
     ):
         super().__init__()
         hidden = hidden or 2 * in_channels
-        self.embed = nn.Embedding(n_organs+1, emb_dim)
+        self.embed = nn.Embedding(n_organs + 1, emb_dim)
 
         self.mlp = nn.Sequential(
             nn.Linear(emb_dim, hidden),
@@ -163,9 +163,7 @@ class FiLM2d(nn.Module):
         mask = organ_id >= 0  # [B]
         q_org = self.embed(organ_id.clamp(min=0))  # [B, D] (dummy for unknown)
         q_img = self.embed(
-            torch.tensor(
-                [self.embed.weight.shape[0] - 1], device=x.device
-            ).expand(B)
+            torch.tensor([self.embed.weight.shape[0] - 1], device=x.device).expand(B)
         )
         q = torch.where(mask[:, None], q_org, q_img)
         beta_gamma = self.mlp(q)  # (B, 2C)
@@ -435,7 +433,9 @@ class UNet2DFiLM(nn.Module):
 
             # Calculate upsampling factor
             spatial_factor = target_spatial // student_spatial
-            self.distill_adapter = nn.Conv2d(student_channels, target_channels, kernel_size=1)
+            self.distill_adapter = nn.Conv2d(
+                student_channels, target_channels, kernel_size=1
+            )
             # sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
             # self.distill_model = MedSAM(
             #     image_encoder=deepcopy(sam_model.image_encoder),
@@ -533,8 +533,8 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding = None,
-        teacher_mask = None,
+        teacher_embedding=None,
+        teacher_mask=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         """
@@ -732,6 +732,9 @@ class MedSAM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        teacher_embedding=None,
+        teacher_mask=None,
+        **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]
 
@@ -793,7 +796,7 @@ class DistillationLoss(nn.Module):
         self.alpha = alpha  # Weight between cosine and MSE
         self.use_l1 = use_l1
 
-    def forward(self, student_logits, teacher_logits, tau = 0.7):
+    def forward(self, student_logits, teacher_logits, tau=0.7):
         """
         Args:
             student_logits: (B, D) - student features
@@ -1011,6 +1014,7 @@ class MedSAMPrompt(nn.Module):
         prompt_encoder,
         freeze_image_encoder=True,
         predict_bboxes=False,
+        n_organs = 1
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -1031,23 +1035,36 @@ class MedSAMPrompt(nn.Module):
         self.bbox_regr = nn.Sequential(nn.Linear(256 * 64 * 64, 4))
 
         # Learnable prompt embeddings (no input required)
-        self.sparse_embeddings = nn.ParameterDict(
-            {
-                str(id_): nn.Parameter(torch.randn(1, 2, 256))
-                for id_ in set(organ_to_class_dict.values())
-            }
-        )
-        self.dense_embeddings = nn.ParameterDict(
-            {
-                str(id_): nn.Parameter(torch.randn(1, 256, 64, 64))
-                for id_ in set(organ_to_class_dict.values())
-            }
-        )
+        self.sparse_embeddings = nn.Parameter(torch.randn(1, 2, 256))
+        self.dense_embeddings  = nn.Embedding(n_organs + 1, 1 * 256 * 64 * 64)
+
+        # self.sparse_embeddings = nn.ParameterDict(
+        #     {
+        #         str(id_): nn.Parameter(torch.randn(1, 2, 256))
+        #         for id_ in set(organ_to_class_dict.values())
+        #     }
+        # )
+        # self.dense_embeddings = nn.ParameterDict(
+        #     {
+        #         str(id_): nn.Parameter(torch.randn(1, 256, 64, 64))
+        #         for id_ in set(organ_to_class_dict.values())
+        #     }
+        # )
 
     def forward(
-        self, pixel_values, organ_id=None, labels=None, masks=None, bbox_coords=None
+        self,
+        pixel_values,
+        organ_id=None,
+        labels=None,
+        masks=None,
+        bbox_coords=None,
+        organ_id_metric=None,
+        teacher_embedding=None,
+        teacher_mask=None,
+        **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]
+        B = pixel_values.shape[0]
 
         # Get image embeddings
         image_embedding = self.image_encoder(pixel_values)  # (B, 256, 64, 64)
@@ -1066,15 +1083,12 @@ class MedSAMPrompt(nn.Module):
             raise ValueError("organ_id must be provided for selecting embeddings.")
 
         sparse_emb_list, dense_emb_list = [], []
-        for oid in organ_id:
+        
 
-            key = str(int(oid.item()))
-            sparse_emb_list.append(self.sparse_embeddings[key])
-            dense_emb_list.append(self.dense_embeddings[key])
 
-        # Stack embeddings for batch
-        sparse_embeddings = torch.cat(sparse_emb_list, dim=0)  # (B, 2, 256)
-        dense_embeddings = torch.cat(dense_emb_list, dim=0)  # (B, 256, 64, 64)
+        mask = organ_id >= 0  # [B]
+        idx = torch.where(mask, organ_id, self.dense_embeddings.weight.shape[0] - 1)
+        dense_embeddings  = self.dense_embeddings(idx).view(B, 256, 64, 64)
 
         # Get positional encoding
         image_pe = self.prompt_encoder.get_dense_pe()  # (1, 256, 64, 64)
@@ -1083,7 +1097,7 @@ class MedSAMPrompt(nn.Module):
         low_res_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embedding,  # (B, 256, 64, 64)
             image_pe=image_pe,  # (1, 256, 64, 64)
-            sparse_prompt_embeddings=sparse_embeddings,  # (B, 2, 256)
+            sparse_prompt_embeddings=self.sparse_embeddings,  # (B, 2, 256)
             dense_prompt_embeddings=dense_embeddings,  # (B, 256, 64, 64)
             multimask_output=False,
         )  # (B, 1, 256, 256)
