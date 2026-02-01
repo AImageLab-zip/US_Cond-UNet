@@ -213,6 +213,7 @@ def train(args: Namespace):
             predict_bboxes=True,
             freeze_image_encoder=0,
         )
+        model.cuda()
 
     elif args.use_medsam_prompt:
         from segment_anything import sam_model_registry
@@ -224,8 +225,10 @@ def train(args: Namespace):
             mask_decoder=deepcopy(sam_model.mask_decoder),
             prompt_encoder=deepcopy(sam_model.prompt_encoder),
             predict_bboxes=True,
-            freeze_image_encoder=args.freeze_image_encoder,
+            freeze_image_encoder=0,
+            n_organs=len(organ_to_class_dict),
         )
+        model.cuda()
 
     elif args.unet_attn:
         model = UNet2DAttn(
