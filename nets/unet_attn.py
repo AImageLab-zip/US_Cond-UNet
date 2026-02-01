@@ -645,6 +645,8 @@ class UNet2DAttn(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        teacher_embedding = None,
+        teacher_mask = None,
         **kwargs,
     ):
         """
@@ -738,8 +740,8 @@ class UNet2DAttn(nn.Module):
             loss = 0.0
 
         if self.distill:
-            teacher_embedding = kwargs.get("teacher_embedding")
-            teacher_mask = kwargs.get("teacher_mask")
+            # teacher_embedding = kwargs.get("teacher_embedding")
+            # teacher_mask = kwargs.get("teacher_mask")
             image_embedding = teacher_embedding.to(out.device)
             mid_res_masks = teacher_mask.to(out.device)
 

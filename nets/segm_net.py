@@ -533,6 +533,8 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        teacher_embedding = None,
+        teacher_mask = None,
         **kwargs,  # ignored, for peft compatibility
     ):
         """
@@ -590,8 +592,8 @@ class UNet2DFiLM(nn.Module):
             loss = 0.0
 
         if self.distill:
-            teacher_embedding = kwargs.get("teacher_embedding")
-            teacher_mask = kwargs.get("teacher_mask")
+            # teacher_embedding = kwargs.get("teacher_embedding")
+            # teacher_mask = kwargs.get("teacher_mask")
 
             image_embedding = teacher_embedding.to(out.device)
             mid_res_masks = teacher_mask.to(out.device)
@@ -603,7 +605,7 @@ class UNet2DFiLM(nn.Module):
                 align_corners=False,
             )
             up_feat = self.distill_adapter(student_resized)
-            distill_loss_emb = self.dinstill_loss(
+            distill_loss_emb = self.distill_loss(
                 student_logits=up_feat, teacher_logits=image_embedding
             )
             distill_loss_logits = self.distill_loss(
