@@ -189,18 +189,7 @@ def train(args: Namespace):
         steps_per_epoch=int(args.epochs / 50),
         seed=args.seed,
     )
-    accelerator = Accelerator()
 
-    if accelerator.is_main_process:
-        wandb.login()
-        wandb.init(
-            entity=args.wandb_entity,
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config=args,
-            # resume = True,
-            # id = 'f14v3x8n'
-        )
     if args.use_medsam:
         from segment_anything import sam_model_registry
 
@@ -266,9 +255,22 @@ def train(args: Namespace):
         run_hash = generate_run_hash(args)
     else:
         run_hash = f"./loggings/{args.resume}"
+    
+    run_id = str(run_hash).split('/')[-1]
     output_dir = f"{run_hash}"
     print(f"Saving results to: {output_dir}")
+    accelerator = Accelerator()
 
+    if accelerator.is_main_process:
+        wandb.login()
+        wandb.init(
+            entity=args.wandb_entity,
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config=args,
+            resume = 'allow' if args.resume != None else 'never',
+            id = run_id,
+        )
     # for steps
     training_args = TrainingArguments(
         output_dir=output_dir,
