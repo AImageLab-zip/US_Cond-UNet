@@ -164,6 +164,12 @@ def parse_args():
         type=str,
         default='haar',
     )
+    parser.add_argument(
+        "--dwt-bands",
+        nargs="+",
+        default=["LL", "LH", "HL", "HH"],
+        help="DWT subbands to use (any combination of: LL LH HL HH).",
+    )
     # -----------------------------------------------
     # |         Optim & Scheduler Config            |
     # -----------------------------------------------
@@ -271,6 +277,27 @@ def parse_args():
         help="",
     )
     args = parser.parse_args()
+    if args.dwt_bands is not None:
+        allowed = {"LL", "LH", "HL", "HH"}
+        raw_bands = []
+        for band in args.dwt_bands:
+            for part in band.split(","):
+                part = part.strip()
+                if part:
+                    raw_bands.append(part)
+        normalized = []
+        seen = set()
+        for band in raw_bands:
+            band = band.upper()
+            if band in seen:
+                continue
+            if band not in allowed:
+                raise ValueError(
+                    f"Invalid DWT band '{band}'. Valid bands: {sorted(allowed)}"
+                )
+            normalized.append(band)
+            seen.add(band)
+        args.dwt_bands = normalized
     return args
 
 

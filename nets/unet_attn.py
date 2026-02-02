@@ -63,13 +63,38 @@ class DWTPatchEmbed(nn.Module):
     - LL: Low-freq approximation (B, C, H/2, W/2)
     - LH, HL, HH: High-freq details (B, C, H/2, W/2 each)
     """
-    def __init__(self, img_size=256, patch_size=8, in_channels=3, embed_dim=256,
-                 wavelet='haar', mode='zero'):
+    def __init__(
+        self,
+        img_size=256,
+        patch_size=8,
+        in_channels=3,
+        embed_dim=256,
+        wavelet='haar',
+        mode='zero',
+        bands: list[str] | None = None,
+    ):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.wavelet = wavelet
         self.mode = mode
+        self.available_bands = ["LL", "LH", "HL", "HH"]
+        if not bands:
+            self.bands = list(self.available_bands)
+        else:
+            normalized = []
+            seen = set()
+            for band in bands:
+                band = band.upper()
+                if band in seen:
+                    continue
+                if band not in self.available_bands:
+                    raise ValueError(
+                        f"Invalid DWT band '{band}'. Valid bands: {self.available_bands}"
+                    )
+                normalized.append(band)
+                seen.add(band)
+            self.bands = normalized
         
         # After 1-level DWT, each subband is img_size/2
         dwt_size = img_size // 2  # 128 for img_size=256
@@ -78,8 +103,9 @@ class DWTPatchEmbed(nn.Module):
         patches_per_dim = dwt_size // patch_size  # 128/8 = 16
         n_patches_per_band = patches_per_dim ** 2  # 256
         
-        # Total patches: 4 subbands × n_patches_per_band
-        self.n_patches = 4 * n_patches_per_band
+        # Total patches: selected subbands × n_patches_per_band
+        self.n_patches = len(self.bands) * n_patches_per_band
+        self.n_patches_per_band = n_patches_per_band
         
         # Separate projections for each subband
         self.proj_LL = nn.Conv2d(in_channels, embed_dim, 
@@ -104,7 +130,7 @@ class DWTPatchEmbed(nn.Module):
         Args:
             x: (B, C, H, W) - input image
         Returns:
-            patches: (B, N, D) where N = 4 * (H/2/patch_size)^2
+            patches: (B, N, D) where N = len(bands) * (H/2/patch_size)^2
         """
         B, C, H, W = x.shape
         
@@ -118,26 +144,22 @@ class DWTPatchEmbed(nn.Module):
         LL = coeffs[0]  # (B, C, H/2, W/2)
         LH, HL, HH = coeffs[1]  # Each (B, C, H/2, W/2)
         
-        # Project each subband to patches
-        patches_LL = self.proj_LL(LL)  # (B, embed_dim, H/2/P, W/2/P)
-        patches_LH = self.proj_LH(LH)
-        patches_HL = self.proj_HL(HL)
-        patches_HH = self.proj_HH(HH)
+        subband_tensors = {
+            "LL": (LL, self.proj_LL, 0),
+            "LH": (LH, self.proj_LH, 1),
+            "HL": (HL, self.proj_HL, 2),
+            "HH": (HH, self.proj_HH, 3),
+        }
+        patches_list = []
+        for band in self.bands:
+            band_tensor, proj, band_idx = subband_tensors[band]
+            band_patches = proj(band_tensor)  # (B, embed_dim, H/2/P, W/2/P)
+            band_patches = rearrange(band_patches, 'b d h w -> b (h w) d')
+            band_patches = band_patches + self.subband_type_embed[band_idx]
+            patches_list.append(band_patches)
         
-        # Reshape to (B, n_patches_per_band, embed_dim)
-        patches_LL = rearrange(patches_LL, 'b d h w -> b (h w) d')
-        patches_LH = rearrange(patches_LH, 'b d h w -> b (h w) d')
-        patches_HL = rearrange(patches_HL, 'b d h w -> b (h w) d')
-        patches_HH = rearrange(patches_HH, 'b d h w -> b (h w) d')
-        
-        # Add subband type embeddings (broadcast across batch and patches)
-        patches_LL = patches_LL + self.subband_type_embed[0]
-        patches_LH = patches_LH + self.subband_type_embed[1]
-        patches_HL = patches_HL + self.subband_type_embed[2]
-        patches_HH = patches_HH + self.subband_type_embed[3]
-        
-        # Concatenate all subbands: (B, 4*n_patches_per_band, embed_dim)
-        patches = torch.cat([patches_LL, patches_LH, patches_HL, patches_HH], dim=1)
+        # Concatenate selected subbands
+        patches = torch.cat(patches_list, dim=1)
         
         # Add positional encoding
         patches = patches + self.pos_embed
@@ -181,6 +203,7 @@ class SharedAttnModulator(nn.Module):
         dropout: float = 0.1,
         use_dwt: bool = True,
         wavelet: str = "haar",
+        dwt_bands: list[str] | None = None,
     ):
         super().__init__()
         self.emb_dim = emb_dim
@@ -194,6 +217,7 @@ class SharedAttnModulator(nn.Module):
                 in_channels=img_channels,
                 embed_dim=emb_dim,
                 wavelet=wavelet,
+                bands=dwt_bands,
             )
         else:
             self.patch_embed = PatchEmbed(
@@ -434,6 +458,7 @@ class UNet2DAttn(nn.Module):
         distill: bool = False,
         use_dwt: bool = True,
         wavelet: str = "haar",
+        dwt_bands: list[str] | None = None,
     ):
         """
         Args:
@@ -487,6 +512,7 @@ class UNet2DAttn(nn.Module):
                 n_heads=n_heads,
                 use_dwt=use_dwt,
                 wavelet=wavelet,
+                dwt_bands=dwt_bands,
             )
 
         # ---------------- Encoder ----------------

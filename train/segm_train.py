@@ -236,6 +236,7 @@ def train(args: Namespace):
             distill=bool(args.distill),
             use_dwt=args.use_dwt,
             wavelet=args.wavelet,
+            dwt_bands=args.dwt_bands,
         )
     else:
         model = UNet2DFiLM(
