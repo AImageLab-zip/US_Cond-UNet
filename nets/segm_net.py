@@ -6,7 +6,9 @@ import os, sys, wandb
 from torchvision.transforms import v2
 from utils.utils import organ_to_class_dict
 from utils.paths import *
-
+from segment_anything import sam_model_registry
+from copy import deepcopy
+from safetensors.torch import load_file
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -419,10 +421,7 @@ class UNet2DFiLM(nn.Module):
         )
 
         if self.distill:
-            from segment_anything import sam_model_registry
-            from copy import deepcopy
-            from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
-            from safetensors.torch import load_file
+
 
             student_channels = 2048 // (2 ** (5 - self.depth))
             student_spatial = 32 * (2 ** (5 - self.depth))
@@ -436,23 +435,23 @@ class UNet2DFiLM(nn.Module):
             self.distill_adapter = nn.Conv2d(
                 student_channels, target_channels, kernel_size=1
             )
-            # sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-            # self.distill_model = MedSAM(
-            #     image_encoder=deepcopy(sam_model.image_encoder),
-            #     mask_decoder=deepcopy(sam_model.mask_decoder),
-            #     prompt_encoder=deepcopy(sam_model.prompt_encoder),
-            #     predict_bboxes=True,
-            #     freeze_image_encoder=0,
-            # )
-            # state_dict = load_file(
-            #     "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
-            # )
-            # self.distill_model.load_state_dict(state_dict)
-            # load_result = self.distill_model.load_state_dict(state_dict)
-            # for p in self.distill_model.parameters():
-            #     p.requires_grad = False
-            # self.distill_model.eval()
-            # print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
+            sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
+            self.distill_model = MedSAM(
+                image_encoder=deepcopy(sam_model.image_encoder),
+                mask_decoder=deepcopy(sam_model.mask_decoder),
+                prompt_encoder=deepcopy(sam_model.prompt_encoder),
+                predict_bboxes=True,
+                freeze_image_encoder=0,
+            )
+            state_dict = load_file(
+                "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
+            )
+            self.distill_model.load_state_dict(state_dict)
+            load_result = self.distill_model.load_state_dict(state_dict)
+            for p in self.distill_model.parameters():
+                p.requires_grad = False
+            self.distill_model.eval()
+            print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
             self.distill_loss = DistillationLoss()
 
     def _enc_forward(self, layer, x, organ_id):
@@ -533,8 +532,6 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         """
@@ -592,12 +589,25 @@ class UNet2DFiLM(nn.Module):
             loss = 0.0
 
         if self.distill:
-            # teacher_embedding = kwargs.get("teacher_embedding")
-            # teacher_mask = kwargs.get("teacher_mask")
 
-            image_embedding = teacher_embedding.to(out.device)
-            mid_res_masks = teacher_mask.to(out.device)
-
+            with torch.no_grad():
+                up_pixel_values = v2.functional.resize(
+                    pixel_values, 1024, v2.InterpolationMode.BICUBIC
+                )
+                image_embedding = self.distill_model.image_encoder(up_pixel_values)
+                image_pe = self.distill_model.prompt_encoder.get_dense_pe()
+                low_res_masks, _ = self.distill_model.mask_decoder(
+                    image_embeddings=image_embedding,
+                    image_pe=image_pe,
+                    sparse_prompt_embeddings=self.distill_model.learned_sparse_embeddings,
+                    dense_prompt_embeddings=self.distill_model.learned_dense_embeddings,
+                    multimask_output=False,
+                )
+                mid_res_masks = v2.functional.resize(
+                    low_res_masks,
+                    out.shape[-1],
+                    v2.InterpolationMode.BICUBIC,
+                )
             student_resized = nn.functional.interpolate(
                 out_bottleneck,
                 size=(image_embedding.shape[-1], image_embedding.shape[-1]),
@@ -732,8 +742,6 @@ class MedSAM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]
@@ -1059,8 +1067,6 @@ class MedSAMPrompt(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]

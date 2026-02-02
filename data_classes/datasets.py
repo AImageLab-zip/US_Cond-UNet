@@ -41,7 +41,6 @@ class USdatasetOmni(Dataset):
         self_norm=False,
         skip_dataset = "",
         id_dropout: float = 0.0,
-        teacher_cache_dir: Optional[Union[str, Path]] = None,
     ):
         base_dir = Path(base_dir)
         self.sample_list = []
@@ -54,7 +53,6 @@ class USdatasetOmni(Dataset):
         self.skip_dataset = skip_dataset
         self.id_dropout = id_dropout  
         self.base_dir = base_dir
-        self.teacher_cache_dir = Path(teacher_cache_dir) if teacher_cache_dir else None
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
@@ -244,17 +242,4 @@ class USdatasetOmni(Dataset):
             "bbox_coords": unormalized_bbox_coords,
             "organ_id_metric": organ_id,
         }
-
-        if self.teacher_cache_dir is not None:
-            image_path = Path(item["image_path"])
-            try:
-                rel = image_path.relative_to(self.base_dir)
-            except ValueError:
-                rel = Path(image_path.parent.name) / image_path.name
-            cache_path = (self.teacher_cache_dir / rel).with_suffix(".pt")
-            if cache_path.is_file():
-                cached = torch.load(cache_path, map_location="cpu")
-                sample["teacher_embedding"] = cached.get("image_embedding")
-                sample["teacher_mask"] = cached.get("mid_res_masks")
-
         return sample
