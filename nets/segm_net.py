@@ -1113,6 +1113,7 @@ class MedSAMPrompt(nn.Module):
             "logits": low_res_masks.squeeze(1),
             "labels": masks,
             "organ_id": organ_id,
+            "organ_id_metric": organ_id_metric,
         }
 
 
