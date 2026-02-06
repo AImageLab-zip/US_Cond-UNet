@@ -170,6 +170,16 @@ def parse_args():
         default=["LL", "LH", "HL", "HH"],
         help="DWT subbands to use (any combination of: LL LH HL HH).",
     )
+    parser.add_argument(
+        "--use-shape",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--shape-res",
+        type=int,
+        default=32,
+    )
     # -----------------------------------------------
     # |         Optim & Scheduler Config            |
     # -----------------------------------------------

@@ -16,10 +16,126 @@ from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt, DistillationLoss
 from safetensors.torch import load_file
 from utils.paths import *
 from torchvision.transforms import v2
-import ptwt  # pytorch_wavelets
-import torch
-import torch.nn as nn
-from einops import rearrange
+import ptwt
+import numpy as np
+
+
+def canonicalize_mask_batch(gt_masks: torch.Tensor, canon_res: int = 32, pad: int = 4):
+    """
+    Args:
+        gt_masks: (B, H, W) binary float tensor (0/1)
+        canon_res: output resolution (int)
+        pad: pixels of padding around bbox (optional)
+    Returns:
+        canon_masks: (B, canon_res, canon_res) float tensor in [0,1]
+    """
+    B, H, W = gt_masks.shape
+    device = gt_masks.device
+    canon_masks = torch.zeros(
+        (B, canon_res, canon_res), device=device, dtype=gt_masks.dtype
+    )
+
+    for i in range(B):
+        m = gt_masks[i]
+        nz = torch.nonzero(m, as_tuple=False)
+        if nz.numel() == 0:
+            # empty mask -> keep zeros
+            continue
+        y_min = int(nz[:, 0].min().clamp(0, H - 1).item())
+        y_max = int(nz[:, 0].max().clamp(0, H - 1).item())
+        x_min = int(nz[:, 1].min().clamp(0, W - 1).item())
+        x_max = int(nz[:, 1].max().clamp(0, W - 1).item())
+
+        # pad bbox
+        y0 = max(0, y_min - pad)
+        y1 = min(H, y_max + pad + 1)
+        x0 = max(0, x_min - pad)
+        x1 = min(W, x_max + pad + 1)
+
+        crop = m[y0:y1, x0:x1].unsqueeze(0).unsqueeze(0)  # (1,1,hc,wc)
+        # Resize to canonical resolution
+        crop_resized = F.interpolate(
+            crop, size=(canon_res, canon_res), mode="bilinear", align_corners=False
+        )
+        canon_masks[i] = crop_resized[0, 0]
+
+    return canon_masks  # (B, canon_res, canon_res)
+
+
+def canonicalize_mask_batch_normalized(
+    gt_masks: torch.Tensor,
+    canon_res: int = 32,
+    target_scale: float = 0.7,  # Target mask to fill 70% of canonical space
+):
+    """
+    Canonical masks with consistent scale normalization.
+    """
+    B, H, W = gt_masks.shape
+    device = gt_masks.device
+    canon_masks = torch.zeros(
+        (B, canon_res, canon_res), device=device, dtype=gt_masks.dtype
+    )
+
+    for i in range(B):
+        m = gt_masks[i]
+        nz = torch.nonzero(m, as_tuple=False)
+        if nz.numel() == 0:
+            continue
+
+        y_coords = nz[:, 0].float()
+        x_coords = nz[:, 1].float()
+
+        # Center of mass
+        com_y = y_coords.mean()
+        com_x = x_coords.mean()
+
+        # Bbox dimensions
+        y_min, y_max = y_coords.min(), y_coords.max()
+        x_min, x_max = x_coords.min(), x_coords.max()
+        bbox_h = (y_max - y_min + 1).item()
+        bbox_w = (x_max - x_min + 1).item()
+
+        # Compute crop size to achieve target scale
+        max_dim = max(bbox_h, bbox_w)
+        crop_size = int(
+            max_dim / target_scale
+        )  # Scale up to make mask fill target_scale
+
+        # Create square crop centered on COM
+        half_crop = crop_size // 2
+        y0 = int(com_y.item()) - half_crop
+        y1 = y0 + crop_size
+        x0 = int(com_x.item()) - half_crop
+        x1 = x0 + crop_size
+
+        # Clamp and pad
+        y0_clamped = max(0, y0)
+        y1_clamped = min(H, y1)
+        x0_clamped = max(0, x0)
+        x1_clamped = min(W, x1)
+
+        crop = m[y0_clamped:y1_clamped, x0_clamped:x1_clamped]
+
+        # Padding
+        pad_top = y0_clamped - y0
+        pad_bottom = crop_size - (y1_clamped - y0_clamped) - pad_top
+        pad_left = x0_clamped - x0
+        pad_right = crop_size - (x1_clamped - x0_clamped) - pad_left
+
+        crop = F.pad(
+            crop.unsqueeze(0).unsqueeze(0),
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode="constant",
+            value=0,
+        )
+
+        # Resize
+        crop_resized = F.interpolate(
+            crop, size=(canon_res, canon_res), mode="bilinear", align_corners=False
+        )
+        canon_masks[i] = crop_resized[0, 0]
+
+    return canon_masks
 
 
 class PatchEmbed(nn.Module):
@@ -49,28 +165,25 @@ class PatchEmbed(nn.Module):
         x = x + self.pos_embed  # Add positional encoding
         return x
 
-import ptwt
-import torch
-import torch.nn as nn
-from einops import rearrange
 
 class DWTPatchEmbed(nn.Module):
     """
     Apply DWT and create patch embeddings from subbands.
     Interface matches PatchEmbed to minimize changes to SharedAttnModulator.
-    
+
     DWT decomposes (B, C, H, W) into:
     - LL: Low-freq approximation (B, C, H/2, W/2)
     - LH, HL, HH: High-freq details (B, C, H/2, W/2 each)
     """
+
     def __init__(
         self,
         img_size=256,
         patch_size=8,
         in_channels=3,
         embed_dim=256,
-        wavelet='haar',
-        mode='zero',
+        wavelet="haar",
+        mode="zero",
         bands: list[str] | None = None,
     ):
         super().__init__()
@@ -95,36 +208,40 @@ class DWTPatchEmbed(nn.Module):
                 normalized.append(band)
                 seen.add(band)
             self.bands = normalized
-        
+
         # After 1-level DWT, each subband is img_size/2
         dwt_size = img_size // 2  # 128 for img_size=256
-        
+
         # Number of patches per subband
         patches_per_dim = dwt_size // patch_size  # 128/8 = 16
-        n_patches_per_band = patches_per_dim ** 2  # 256
-        
+        n_patches_per_band = patches_per_dim**2  # 256
+
         # Total patches: selected subbands × n_patches_per_band
         self.n_patches = len(self.bands) * n_patches_per_band
         self.n_patches_per_band = n_patches_per_band
-        
+
         # Separate projections for each subband
-        self.proj_LL = nn.Conv2d(in_channels, embed_dim, 
-                                 kernel_size=patch_size, stride=patch_size)
-        self.proj_LH = nn.Conv2d(in_channels, embed_dim,
-                                 kernel_size=patch_size, stride=patch_size)
-        self.proj_HL = nn.Conv2d(in_channels, embed_dim,
-                                 kernel_size=patch_size, stride=patch_size)
-        self.proj_HH = nn.Conv2d(in_channels, embed_dim,
-                                 kernel_size=patch_size, stride=patch_size)
-        
+        self.proj_LL = nn.Conv2d(
+            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
+        self.proj_LH = nn.Conv2d(
+            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
+        self.proj_HL = nn.Conv2d(
+            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
+        self.proj_HH = nn.Conv2d(
+            in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
+        )
+
         # Shared positional encoding for all patches
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, embed_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        
+
         # Learnable subband type embeddings
         self.subband_type_embed = nn.Parameter(torch.zeros(4, embed_dim))
         nn.init.trunc_normal_(self.subband_type_embed, std=0.02)
-        
+
     def forward(self, x):
         """
         Args:
@@ -133,17 +250,17 @@ class DWTPatchEmbed(nn.Module):
             patches: (B, N, D) where N = len(bands) * (H/2/patch_size)^2
         """
         B, C, H, W = x.shape
-        
+
         # Apply DWT using ptwt - correct API
         # wavedec2 returns coefficients in format: [LL, (LH, HL, HH)]
         coeffs = ptwt.wavedec2(x, wavelet=self.wavelet, mode=self.mode, level=1)
-        
+
         # Extract subbands
         # coeffs[0] is LL (approximation)
         # coeffs[1] is tuple of (LH, HL, HH) detail coefficients
         LL = coeffs[0]  # (B, C, H/2, W/2)
         LH, HL, HH = coeffs[1]  # Each (B, C, H/2, W/2)
-        
+
         subband_tensors = {
             "LL": (LL, self.proj_LL, 0),
             "LH": (LH, self.proj_LH, 1),
@@ -154,17 +271,18 @@ class DWTPatchEmbed(nn.Module):
         for band in self.bands:
             band_tensor, proj, band_idx = subband_tensors[band]
             band_patches = proj(band_tensor)  # (B, embed_dim, H/2/P, W/2/P)
-            band_patches = rearrange(band_patches, 'b d h w -> b (h w) d')
+            band_patches = rearrange(band_patches, "b d h w -> b (h w) d")
             band_patches = band_patches + self.subband_type_embed[band_idx]
             patches_list.append(band_patches)
-        
+
         # Concatenate selected subbands
         patches = torch.cat(patches_list, dim=1)
-        
+
         # Add positional encoding
         patches = patches + self.pos_embed
-        
+
         return patches
+
 
 class FiLMLayer(nn.Module):
     """Simple FiLM layer that applies gamma * x + beta modulation"""
@@ -204,11 +322,15 @@ class SharedAttnModulator(nn.Module):
         use_dwt: bool = True,
         wavelet: str = "haar",
         dwt_bands: list[str] | None = None,
-    ):
+        use_shape: bool = False,
+        shape_res=32,
+    ) -> None:
         super().__init__()
         self.emb_dim = emb_dim
         self.n_layers = n_layers
         self.max_channels = max_channels
+        self.use_shape = use_shape
+        self.shape_res = shape_res
 
         if use_dwt:
             self.patch_embed = DWTPatchEmbed(
@@ -233,9 +355,17 @@ class SharedAttnModulator(nn.Module):
         )  # the +1 is for the unknown organ
         nn.init.normal_(self.organ_embed.weight, mean=0, std=0.02)
 
-        # Layer embedding - NEW
+        # Layer embedding
         self.layer_embed = nn.Embedding(n_layers, emb_dim)
         nn.init.normal_(self.layer_embed.weight, mean=0, std=0.02)
+
+        if self.use_shape:
+            # Shape embedding
+            self.shape_embed = nn.Embedding(
+                n_organs + 1, emb_dim
+            )  # the +1 is for the unknown organ
+            nn.init.normal_(self.shape_embed.weight, mean=0, std=0.02)
+            self.shape_proj = nn.Linear(self.emb_dim, self.shape_res**2)
 
         # Learnable influence token
         self.influence_token = nn.Parameter(torch.zeros(1, 1, emb_dim))
@@ -287,7 +417,7 @@ class SharedAttnModulator(nn.Module):
         patches = self.patch_embed(original_img)  # (B, N, D)
 
         modulations = {}
-
+        projected_shapes = []
         for layer_id, n_channels in layer_configs:
             # Get layer embedding
             layer_emb = self.layer_embed(
@@ -306,15 +436,40 @@ class SharedAttnModulator(nn.Module):
                 ).expand(B)
             )
             q = torch.where(mask[:, None], q_org, q_img) + layer_emb  # [B, D]
-            queries = q[:, None, :]  # [B, 1, D] for attention
+            queries_organ = q[:, None, :]  # [B, 1, D] for attention
 
-            # Prepend influence token
             influence_tokens = self.influence_token.expand(B, -1, -1)  # (B, 1, D)
-            queries = torch.cat([influence_tokens, queries], dim=1)  # (B, 2, D)
+
+            if self.use_shape:
+                q_org = self.shape_embed(
+                    organ_id.clamp(min=0)
+                )  # [B, D] (dummy for unknown)
+                q_img = self.shape_embed(
+                    torch.tensor(
+                        [self.shape_embed.weight.shape[0] - 1],
+                        device=original_img.device,
+                    ).expand(B)
+                )
+                q = torch.where(mask[:, None], q_org, q_img)  # [B, D]
+                queries_shape = q[:, None, :]  # [B, 1, D] for attention
+                queries_shape_detached = queries_shape.detach()
+                flattened_shape = self.shape_proj(queries_shape[:, 0, :])  # Use non-detached for shape loss
+                projected_shape = flattened_shape.reshape(B, self.shape_res, self.shape_res)
+                projected_shapes.append(projected_shape)
+
+                # Prepend influence token
+                queries = torch.cat(
+                    [influence_tokens, queries_organ, queries_shape_detached], dim=1
+                )  # (B, 3, D)
+
+            else:
+                queries = torch.cat(
+                    [influence_tokens, queries_organ], dim=1
+                )  # (B, 3, D)
 
             # Attention
             attn_out, _ = self.attn(
-                query=queries,  # (B, 2, D)
+                query=queries,  # (B, 3, D)
                 key=patches,  # (B, N, D)
                 value=patches,  # (B, N, D)
             )
@@ -341,7 +496,12 @@ class SharedAttnModulator(nn.Module):
 
             modulations[layer_id] = (gamma, beta)
 
-        return modulations
+        if projected_shapes == []:
+            projected_shapes = torch.Tensor([])
+        else:
+            projected_shapes = torch.stack(projected_shapes)
+
+        return modulations, projected_shapes.to(original_img.device)
 
 
 class DownConvBlockFiLM(nn.Module):
@@ -459,6 +619,8 @@ class UNet2DAttn(nn.Module):
         use_dwt: bool = True,
         wavelet: str = "haar",
         dwt_bands: list[str] | None = None,
+        use_shape: bool = False,
+        shape_res=32,
     ):
         """
         Args:
@@ -481,11 +643,13 @@ class UNet2DAttn(nn.Module):
         self.depth = depth
         self.attn_start = max(0, int(attn_start))
         self.use_attn = use_attn
+        self.use_shape = use_shape
         self.n_organs = n_organs
         self.img_size = img_size
         self.distill = distill
-
+        self.shape_res = shape_res
         self.criterion = DiceBCELoss()
+        self.steps_counter = 0
 
         # Compute max channels needed
         max_channels = size * (2 ** (depth + 1))
@@ -513,6 +677,8 @@ class UNet2DAttn(nn.Module):
                 use_dwt=use_dwt,
                 wavelet=wavelet,
                 dwt_bands=dwt_bands,
+                use_shape=use_shape,
+                shape_res=shape_res,
             )
 
         # ---------------- Encoder ----------------
@@ -606,7 +772,9 @@ class UNet2DAttn(nn.Module):
             # Calculate upsampling factor
             spatial_factor = target_spatial // student_spatial
 
-            self.distill_adapter = nn.Conv2d(student_channels, target_channels, kernel_size=1)
+            self.distill_adapter = nn.Conv2d(
+                student_channels, target_channels, kernel_size=1
+            )
 
             sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
             self.distill_model = MedSAM(
@@ -670,8 +838,8 @@ class UNet2DAttn(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding = None,
-        teacher_mask = None,
+        teacher_embedding=None,
+        teacher_mask=None,
         **kwargs,
     ):
         """
@@ -688,7 +856,7 @@ class UNet2DAttn(nn.Module):
         # Pre-compute all gamma/beta if using attention
         if self.use_attn:
             layer_configs = self._build_layer_configs()
-            modulations = self.shared_attn.compute_all_modulations(
+            modulations, projected_shapes = self.shared_attn.compute_all_modulations(
                 original_img, organ_id, layer_configs
             )
 
@@ -816,6 +984,43 @@ class UNet2DAttn(nn.Module):
 
             loss = loss + distill_loss_emb["loss"]
 
+        self.steps_counter += 1
+        if self.use_shape:
+            reduced_masks = canonicalize_mask_batch_normalized(
+                masks, canon_res=self.shape_res
+            )
+            loss_shape = torch.tensor([0.0], requires_grad=True).to(loss.device)
+            for projected_shape in projected_shapes:
+                loss_shape = loss_shape + self.criterion(projected_shape, reduced_masks)
+
+            loss_shape = loss_shape / projected_shapes.shape[0]
+
+            if wandb.run is not None:
+                wandb.log(
+                    {
+                        "shape_loss": loss_shape.item(),
+                    },
+                    commit=False,
+                )
+            loss = loss + loss_shape
+
+            if self.steps_counter % 200 == 0:
+                with torch.no_grad():
+                    proj_tokens = torch.sigmoid(
+                        self.shared_attn.shape_proj(
+                            self.shared_attn.shape_embed.weight[:8].clone().detach()
+                        )
+                        .reshape(8, self.shape_res, self.shape_res)
+                        .detach()
+                    ) 
+                proj_tokens = (proj_tokens > 0.5).to(torch.float32)
+                proj_vis = (
+                    proj_tokens.view(2, 4, self.shape_res, self.shape_res)   # (rows, cols, H, W)
+                    .permute(0, 2, 1, 3) # (rows, H, cols, W)
+                    .reshape(self.shape_res*2, self.shape_res*4)   # merge
+                )
+                wandb.log({'projected_tokens':wandb.Image(proj_vis.unsqueeze(0))})
+                print("log")
         return {
             "loss": loss,
             "logits": out,

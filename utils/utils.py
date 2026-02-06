@@ -296,11 +296,11 @@ def extract_bbox_ultrasound_cv2(
 
 
 def generate_run_hash(args: Namespace) -> str:
-    if args.debug:
-        return "./loggings/debug"
     """Generate a unique hash for the run based on configuration and timestamp"""
     config_str = f"{args.wandb_run_name}_{args.seed}_{args.learning_rate}_{args.batch_size}_{time.time()}"
     hash_object = hashlib.md5(config_str.encode())
+    if args.debug:
+        return f"./loggings/debug{hash_object.hexdigest()[:12]}"
     return f"./loggings/{hash_object.hexdigest()[:12]}"
 
 
