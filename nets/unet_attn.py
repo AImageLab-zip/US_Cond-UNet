@@ -840,6 +840,7 @@ class UNet2DAttn(nn.Module):
         organ_id_metric=None,
         teacher_embedding=None,
         teacher_mask=None,
+        pixel_values_medsam=None,
         **kwargs,
     ):
         """
@@ -935,7 +936,7 @@ class UNet2DAttn(nn.Module):
         if self.distill:
             with torch.no_grad():
                 up_pixel_values = v2.functional.resize(
-                    pixel_values, 1024, v2.InterpolationMode.BICUBIC
+                    pixel_values_medsam, 1024, v2.InterpolationMode.BICUBIC
                 )
                 image_embedding = self.distill_model.image_encoder(up_pixel_values)
                 image_pe = self.distill_model.prompt_encoder.get_dense_pe()
@@ -951,6 +952,7 @@ class UNet2DAttn(nn.Module):
                     out.shape[-1],
                     v2.InterpolationMode.BICUBIC,
                 )
+            
             student_resized = nn.functional.interpolate(
                 out_bottleneck,
                 size=(image_embedding.shape[-1], image_embedding.shape[-1]),

@@ -316,18 +316,12 @@ def get_sft_transforms(train: bool):
                 ),
                 v2.ColorJitter(brightness=0.4, contrast=0.4),
                 v2.ToDtype(torch.float32, scale=False),
-                v2.Normalize(
-                    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]
-                ),
             ]
         )
     else:
         return v2.Compose(
             [
                 v2.ToDtype(torch.float32, scale=False),
-                v2.Normalize(
-                    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375]
-                ),
             ]
         )
 

@@ -25,7 +25,7 @@ from sklearn.neighbors import NearestNeighbors
 import numpy as np
 import pickle
 from typing import Literal, Optional, Union
-
+from torchvision.transforms import v2
 
 
 class USdatasetOmni(Dataset):
@@ -56,16 +56,6 @@ class USdatasetOmni(Dataset):
         self.dataset_list = []
         self.sample_by_organ = {k: [] for k in organ_to_class_dict.keys()}
         self.all_bboxes = {}
-        self.mean = (
-            torch.Tensor([127.5,127.5,127.5])
-            .view(3, 1, 1)
-            .expand(3, out_size, out_size)
-        )
-        self.std = (
-            torch.Tensor([58.395, 57.12, 57.375])
-            .view(3, 1, 1)
-            .expand(3, out_size, out_size)
-        )
         self.items = []
         for dataset_dir in base_dir.iterdir():
             if dataset_dir.name in self.dataset_list:
@@ -233,9 +223,12 @@ class USdatasetOmni(Dataset):
         
         if self.skip_dataset != "" and self.skip_dataset in item["image_path"]:
             organ_id = organ_to_class_dict['unknown']
-
+        
+        image_normed_medsam = (image - image.min())/torch.clip(image.max() - image.min(), min=1e-8, max=None)
+        image_normed = v2.functional.normalize(image, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
         sample = {
-            "pixel_values": image.to(torch.float),
+            "pixel_values": image_normed.to(torch.float),
+            "pixel_values_medsam": image_normed_medsam.to(torch.float),
             "organ_id": organ_id,
             "labels": item["multi_cls_label"],
             "masks": mask.to(torch.float).squeeze(),

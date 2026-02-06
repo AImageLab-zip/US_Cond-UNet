@@ -118,7 +118,6 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             skip_dataset=args.val_skip_dataset,
             id_dropout=0.0,
-
         )
     else:
         train_dataset = USdatasetOmni(

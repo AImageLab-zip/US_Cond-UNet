@@ -532,6 +532,7 @@ class UNet2DFiLM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        pixel_values_medsam=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         """
@@ -592,7 +593,7 @@ class UNet2DFiLM(nn.Module):
 
             with torch.no_grad():
                 up_pixel_values = v2.functional.resize(
-                    pixel_values, 1024, v2.InterpolationMode.BICUBIC
+                    pixel_values_medsam, 1024, v2.InterpolationMode.BICUBIC
                 )
                 image_embedding = self.distill_model.image_encoder(up_pixel_values)
                 image_pe = self.distill_model.prompt_encoder.get_dense_pe()
@@ -742,12 +743,13 @@ class MedSAM(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        pixel_values_medsam=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]
 
         # Get image embeddings
-        image_embedding = self.image_encoder(pixel_values)  # (B, 256, 64, 64)
+        image_embedding = self.image_encoder(pixel_values_medsam)  # (B, 256, 64, 64)
 
         # Classification output
         emb_flattened = torch.flatten(image_embedding, 1)
@@ -847,173 +849,6 @@ class DistillationLoss(nn.Module):
             "loss": loss,
         }
 
-
-class UNet2DFiLMDistillation(nn.Module):
-    """
-    Improved distillation wrapper with better feature alignment.
-    """
-
-    def __init__(
-        self,
-        student_config,
-        teacher_model=None,
-        temperature=3.0,
-        extract_features=True,
-        use_patch_tokens=False,  # New: use DINOv3 patch tokens instead of CLS
-    ):
-        super().__init__()
-
-        # Initialize student model
-        self.student = UNet2DFiLM(**student_config)
-
-        # Calculate student bottleneck size
-        # Bottleneck output has size * 2^(depth+1) channels
-        # depth=5: 32 * 2^6 = 2048 channels
-        # depth=3: 32 * 2^4 = 512 channels
-        student_bottleneck_channels = student_config["size"] * (
-            2 ** (student_config["depth"] + 1)
-        )
-
-        self.use_patch_tokens = use_patch_tokens
-
-        if use_patch_tokens:
-            # DINOv3 vit-huge/16 with 512x512 input -> 32x32 patch tokens
-            # Each token is 1280-dim
-            # We'll use spatial features from student
-            teacher_dim = 1280
-            # Keep spatial, just reduce channels
-            self.adaptive_pool = nn.AdaptiveAvgPool2d((32, 32))  # Match DINOv3 patches
-            self.adapter = nn.Sequential(
-                nn.Conv2d(student_bottleneck_channels, 512, 1),
-                nn.BatchNorm2d(512),
-                nn.ReLU(),
-                nn.Conv2d(512, teacher_dim, 1),
-            )
-        else:
-            # Use global features (CLS token from DINOv3)
-            teacher_dim = 1280
-            self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
-            self.adapter = nn.Sequential(
-                nn.Linear(student_bottleneck_channels, 512),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(512, teacher_dim),
-            )
-
-        # Set up teacher model
-        self.teacher = teacher_model
-        if self.teacher is not None:
-            for param in self.teacher.parameters():
-                param.requires_grad = False
-            self.teacher.eval()
-
-        # Improved distillation loss
-        self.distillation_loss = DistillationLoss(temperature, alpha=0.7)
-        self.extract_features = extract_features
-
-    def set_teacher(self, teacher_model):
-        """Set or update the teacher model after initialization"""
-        self.teacher = teacher_model
-        if self.teacher is not None:
-            for param in self.teacher.parameters():
-                param.requires_grad = False
-            self.teacher.eval()
-
-    def train(self, mode=True):
-        """Override train() to keep teacher in eval mode"""
-        super().train(mode)
-        if self.teacher is not None:
-            self.teacher.eval()
-        return self
-
-    def forward(
-        self,
-        pixel_values,
-        organ_id=None,
-        labels=None,
-        masks=None,
-        bbox_coords=None,
-        return_teacher=False,
-    ):
-        """
-        Forward pass with improved knowledge distillation.
-        """
-        # Student forward pass
-        stud_out = self.student.encode(pixel_values, organ_id)
-        stud_bottleneck = stud_out[0]  # (B, C, H, W)
-
-        if self.use_patch_tokens:
-            # Spatial distillation
-            pooled = self.adaptive_pool(stud_bottleneck)  # (B, C, 32, 32)
-            student_features = self.adapter(pooled)  # (B, 1280, 32, 32)
-            # Flatten spatial dimensions: (B, 1280, 1024)
-            student_logits = student_features.flatten(2).transpose(1, 2)
-            student_logits = student_logits.mean(
-                dim=1
-            )  # Average over patches (B, 1280)
-        else:
-            # Global distillation
-            pooled = self.adaptive_pool(stud_bottleneck)  # (B, C, 1, 1)
-            pooled = pooled.flatten(1)  # (B, C)
-            student_logits = self.adapter(pooled)  # (B, 1280)
-
-        # Teacher forward pass (no gradients)
-        teacher_logits = None
-        if self.teacher is not None:
-            with torch.no_grad():
-                if self.use_patch_tokens:
-                    # Get patch tokens from DINOv3
-                    teacher_output = self.teacher.forward_features(pixel_values)
-                    # Average patch tokens (excluding CLS)
-                    teacher_logits = teacher_output["x_norm_patchtokens"].mean(
-                        dim=1
-                    )  # (B, 1280)
-                else:
-                    # Get CLS token from DINOv3
-                    teacher_logits = self.teacher(pixel_values)  # (B, 1280)
-
-        # Calculate distillation loss
-        if self.teacher is not None and teacher_logits is not None:
-            loss_dict = self.distillation_loss(student_logits, teacher_logits)
-            loss = loss_dict["loss"]
-        else:
-            raise ValueError("Teacher model is required for distillation training")
-
-        output = {
-            "loss": loss,
-            "logits": student_logits,
-            "labels": masks,
-            "organ_id": organ_id,
-            "cosine_loss": loss_dict.get("cosine_loss", 0),
-            "mse_loss": loss_dict.get("mse_loss", 0),
-        }
-
-        return output
-
-    def __str__(self):
-        student_params = sum(
-            p.numel() for p in self.student.parameters() if p.requires_grad
-        )
-        adapter_params = sum(
-            p.numel() for p in self.adapter.parameters() if p.requires_grad
-        )
-        teacher_params = (
-            sum(p.numel() for p in self.teacher.parameters())
-            if self.teacher is not None
-            else 0
-        )
-
-        return (
-            f"UNet2DFiLMDistillation(\n"
-            f"  Student parameters: {student_params:,}\n"
-            f"  Adapter parameters: {adapter_params:,}\n"
-            f"  Teacher parameters: {teacher_params:,}\n"
-            f"  Temperature: {self.distillation_loss.temperature}\n"
-            f"  Mode: {'Patch tokens' if self.use_patch_tokens else 'CLS token'}\n"
-            f")"
-        )
-
-
 class MedSAMPrompt(nn.Module):
     def __init__(
         self,
@@ -1067,13 +902,14 @@ class MedSAMPrompt(nn.Module):
         masks=None,
         bbox_coords=None,
         organ_id_metric=None,
+        pixel_values_medsam=None,
         **kwargs,  # ignored, for peft compatibility
     ):
         batch_size = pixel_values.shape[0]
         B = pixel_values.shape[0]
 
         # Get image embeddings
-        image_embedding = self.image_encoder(pixel_values)  # (B, 256, 64, 64)
+        image_embedding = self.image_encoder(pixel_values_medsam)  # (B, 256, 64, 64)
 
         # Classification output
         emb_flattened = torch.flatten(image_embedding, 1)
