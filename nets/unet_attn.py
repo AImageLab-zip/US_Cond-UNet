@@ -7,17 +7,10 @@ from nets.segm_net import (
     DownConvBlock,
     UpConvBlock,
     DiceBCELoss,
-    pad_to_2d,
-    unpad_2d,
 )
-from segment_anything import sam_model_registry
-from copy import deepcopy
-from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt, DistillationLoss
-from safetensors.torch import load_file
-from utils.paths import *
-from torchvision.transforms import v2
 import ptwt
 import numpy as np
+from nets.unet_base import BaseUnet
 
 
 def canonicalize_mask_batch(gt_masks: torch.Tensor, canon_res: int = 32, pad: int = 4):
@@ -453,8 +446,12 @@ class SharedAttnModulator(nn.Module):
                 q = torch.where(mask[:, None], q_org, q_img)  # [B, D]
                 queries_shape = q[:, None, :]  # [B, 1, D] for attention
                 queries_shape_detached = queries_shape.detach()
-                flattened_shape = self.shape_proj(queries_shape[:, 0, :])  # Use non-detached for shape loss
-                projected_shape = flattened_shape.reshape(B, self.shape_res, self.shape_res)
+                flattened_shape = self.shape_proj(
+                    queries_shape[:, 0, :]
+                )  # Use non-detached for shape loss
+                projected_shape = flattened_shape.reshape(
+                    B, self.shape_res, self.shape_res
+                )
                 projected_shapes.append(projected_shape)
 
                 # Prepend influence token
@@ -596,7 +593,7 @@ class UpConvBlockFiLM(nn.Module):
         return x
 
 
-class UNet2DAttn(nn.Module):
+class UNet2DAttn(BaseUnet):
     """
     UNet with shared attention-based conditioning.
     Computes all gamma/beta at the start of forward pass.
@@ -609,18 +606,23 @@ class UNet2DAttn(nn.Module):
         n_organs: int,
         size: int = 32,
         depth: int = 3,
+        *,
         attn_start: int = 0,
         use_attn: bool = True,
-        img_size: int = 256,
-        patch_size: int = 16,
-        emb_dim: int = 256,
+        img_size: int = 512,
+        patch_size: int = 8,
+        emb_dim: int = 768,
         n_heads: int = 8,
         distill: bool = False,
+        distill_unet: bool = False,
+        medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
+        unet_teacher_ckpt: str = "/media/disk1/US_FiLMUNet/checkpoints/unet5_attn/model.safetensors",
+        unet_teacher_kwargs: dict | None = None,
         use_dwt: bool = True,
         wavelet: str = "haar",
         dwt_bands: list[str] | None = None,
         use_shape: bool = False,
-        shape_res=32,
+        shape_res: int = 64,
     ):
         """
         Args:
@@ -636,41 +638,83 @@ class UNet2DAttn(nn.Module):
             emb_dim: Embedding dimension for attention
             n_heads: Number of attention heads
         """
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = num_classes
-        self.size = size
-        self.depth = depth
+        super().__init__(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            n_organs=n_organs,
+            size=size,
+            depth=depth,
+            attn_start=attn_start,
+            use_attn=use_attn,
+            img_size=img_size,
+            patch_size=patch_size,
+            emb_dim=emb_dim,
+            n_heads=n_heads,
+            distill=distill,
+            distill_unet=distill_unet,
+            medsam_teacher_ckpt=medsam_teacher_ckpt,
+            unet_teacher_ckpt=unet_teacher_ckpt,
+            unet_teacher_kwargs=unet_teacher_kwargs,
+            use_dwt=use_dwt,
+            wavelet=wavelet,
+            dwt_bands=dwt_bands,
+            use_shape=use_shape,
+            shape_res=shape_res,
+        )
+
+    def _build_model(
+        self,
+        *,
+        attn_start: int = 0,
+        use_attn: bool = True,
+        img_size: int = 512,
+        patch_size: int = 8,
+        emb_dim: int = 768,
+        n_heads: int = 8,
+        distill: bool = False,
+        distill_unet: bool = False,
+        medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
+        unet_teacher_ckpt: str = "./loggings/6c4b0a465d57/checkpoint-8000/model.safetensors",
+        unet_teacher_kwargs: dict | None = None,
+        use_dwt: bool = True,
+        wavelet: str = "haar",
+        dwt_bands: list[str] | None = None,
+        use_shape: bool = False,
+        shape_res: int = 64,
+        **kwargs,
+    ):
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unexpected UNet2DAttn kwargs: {unknown}")
+
         self.attn_start = max(0, int(attn_start))
-        self.use_attn = use_attn
-        self.use_shape = use_shape
-        self.n_organs = n_organs
-        self.img_size = img_size
-        self.distill = distill
-        self.shape_res = shape_res
+        self.use_attn = bool(use_attn)
+        self.use_shape = bool(use_shape)
+        self.img_size = int(img_size)
+        self.shape_res = int(shape_res)
         self.criterion = DiceBCELoss()
         self.steps_counter = 0
 
         # Compute max channels needed
-        max_channels = size * (2 ** (depth + 1))
+        max_channels = self.size * (2 ** (self.depth + 1))
 
         # Create shared attention modulator
         if self.use_attn:
             # Count total number of layers that will use attention
             n_attn_layers = 0
-            for i in range(depth):
+            for i in range(self.depth):
                 if i >= self.attn_start:
                     n_attn_layers += 2  # encoder has 2 conv blocks per level
             n_attn_layers += 2  # bottleneck
-            for i in range(depth):
+            for i in range(self.depth):
                 if i >= self.attn_start:
                     n_attn_layers += 2  # decoder has 2 conv blocks per level
 
             self.shared_attn = SharedAttnModulator(
-                n_organs=n_organs,
+                n_organs=self.n_organs,
                 n_layers=n_attn_layers,
                 max_channels=max_channels,
-                img_size=img_size,
+                img_size=self.img_size,
                 patch_size=patch_size,
                 emb_dim=emb_dim,
                 n_heads=n_heads,
@@ -760,40 +804,13 @@ class UNet2DAttn(nn.Module):
             self.out_channels,
             conv_kwargs={"kernel_size": 1, "stride": 1, "padding": 0},
         )
-
-        if self.distill:
-            student_channels = 2048 // (2 ** (5 - self.depth))
-            student_spatial = 32 * (2 ** (5 - self.depth))
-
-            # Target: 256 channels, 64x64 (teacher output)
-            target_channels = 256
-            target_spatial = 64
-
-            # Calculate upsampling factor
-            spatial_factor = target_spatial // student_spatial
-
-            self.distill_adapter = nn.Conv2d(
-                student_channels, target_channels, kernel_size=1
-            )
-
-            sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-            self.distill_model = MedSAM(
-                image_encoder=deepcopy(sam_model.image_encoder),
-                mask_decoder=deepcopy(sam_model.mask_decoder),
-                prompt_encoder=deepcopy(sam_model.prompt_encoder),
-                predict_bboxes=True,
-                freeze_image_encoder=0,
-            )
-            state_dict = load_file(
-                "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
-            )
-            self.distill_model.load_state_dict(state_dict)
-            load_result = self.distill_model.load_state_dict(state_dict)
-            for p in self.distill_model.parameters():
-                p.requires_grad = False
-            self.distill_model.eval()
-            print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
-            self.distill_loss = DistillationLoss()
+        self._init_distillation(
+            distill=distill,
+            distill_unet=distill_unet,
+            medsam_teacher_ckpt=medsam_teacher_ckpt,
+            unet_teacher_ckpt=unet_teacher_ckpt,
+            unet_teacher_kwargs=unet_teacher_kwargs,
+        )
 
     def _build_layer_configs(self):
         """
@@ -830,203 +847,116 @@ class UNet2DAttn(nn.Module):
 
         return configs
 
-    def forward(
+    def _prepare_forward(
         self,
-        pixel_values,
-        organ_id=None,
-        labels=None,
-        masks=None,
-        bbox_coords=None,
-        organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
-        pixel_values_medsam=None,
+        *,
+        pixel_values: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
         **kwargs,
-    ):
-        """
-        Forward pass through the network.
-
-        Args:
-            pixel_values: Input images (B, C, H, W) - MUST be 256x256
-            organ_id: Organ type IDs for attention conditioning (B,)
-            masks: Ground truth masks (B, H, W)
-        """
-        x = pixel_values
-        original_img = pixel_values
-
-        # Pre-compute all gamma/beta if using attention
+    ) -> dict:
+        forward_ctx = {
+            "mod_list": None,
+            "mod_idx": 0,
+            "projected_shapes": None,
+        }
         if self.use_attn:
             layer_configs = self._build_layer_configs()
             modulations, projected_shapes = self.shared_attn.compute_all_modulations(
-                original_img, organ_id, layer_configs
+                pixel_values, organ_id, layer_configs
             )
+            forward_ctx["mod_list"] = [modulations[i] for i in range(len(layer_configs))]
+            forward_ctx["projected_shapes"] = projected_shapes
+        return forward_ctx
 
-            # Convert to list for easy indexing
-            mod_list = [modulations[i] for i in range(len(layer_configs))]
-            mod_idx = 0
+    def _next_modulation(self, forward_ctx: dict):
+        mod_idx = forward_ctx["mod_idx"]
+        mod_list = forward_ctx["mod_list"]
+        gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+        betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+        forward_ctx["mod_idx"] = mod_idx + 2
+        return gammas, betas
 
-        feat_list = []
+    def _encode(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        forward_ctx: dict | None = None,
+    ):
+        if isinstance(layer, DownConvBlockFiLM):
+            gammas, betas = self._next_modulation(forward_ctx)
+            return layer(x, gammas, betas)
+        return layer(x)
 
-        # Padding if needed
-        pre_padding = (
-            (x.size(-1) % 2**self.depth != 0)
-            or (x.size(-2) % 2**self.depth != 0)
-            or (x.size(-3) % 2**self.depth != 0)
-        )
-        if pre_padding:
-            x, pads = pad_to_2d(x, 2**self.depth)
-            original_img, _ = pad_to_2d(original_img, 2**self.depth)
-
-        # Encoder
-        if isinstance(self.encoder["0"], DownConvBlockFiLM):
-            gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
-            betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
-            mod_idx += 2
-            out, feat = self.encoder["0"](x, gammas, betas)
-        else:
-            out, feat = self.encoder["0"](x)
-        feat_list.append(feat)
-
-        for key in list(self.encoder.keys())[1:]:
-            if isinstance(self.encoder[key], DownConvBlockFiLM):
-                gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
-                betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
-                mod_idx += 2
-                out, feat = self.encoder[key](out, gammas, betas)
-            else:
-                out, feat = self.encoder[key](out)
-            feat_list.append(feat)
-
-        # Bottleneck
+    def _bottleneck(
+        self,
+        x: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        forward_ctx: dict | None = None,
+    ):
         if isinstance(self.bottleneck, UpConvBlockFiLM):
-            gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
-            betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
-            mod_idx += 2
-            out = self.bottleneck(out, gammas, betas)
-        else:
-            out = self.bottleneck(out)
-        out_bottleneck = out
+            gammas, betas = self._next_modulation(forward_ctx)
+            return self.bottleneck(x, gammas, betas)
+        return self.bottleneck(x)
 
-        # Decoder
-        for key in self.decoder:
-            concat_feat = torch.cat((out, feat_list[int(key)]), dim=1)
+    def _decode(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        forward_ctx: dict | None = None,
+    ):
+        if isinstance(layer, UpConvBlockFiLM):
+            gammas, betas = self._next_modulation(forward_ctx)
+            return layer(x, gammas, betas)
+        return layer(x)
 
-            if isinstance(self.decoder[key], UpConvBlockFiLM):
-                gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
-                betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
-                mod_idx += 2
-                out = self.decoder[key](concat_feat, gammas, betas)
-            else:
-                out = self.decoder[key](concat_feat)
-
-            del feat_list[int(key)]
-
-        # Output
-        out = self.out_layer(out)
-
-        if pre_padding:
-            out = unpad_2d(out, pads).squeeze(1)
-
-        # Calculate loss if masks provided
-        if masks is not None:
-            loss = self.criterion(out, masks)
-        else:
-            loss = 0.0
-
-        if self.distill:
-            with torch.no_grad():
-                up_pixel_values = v2.functional.resize(
-                    pixel_values_medsam, 1024, v2.InterpolationMode.BICUBIC
-                )
-                image_embedding = self.distill_model.image_encoder(up_pixel_values)
-                image_pe = self.distill_model.prompt_encoder.get_dense_pe()
-                low_res_masks, _ = self.distill_model.mask_decoder(
-                    image_embeddings=image_embedding,
-                    image_pe=image_pe,
-                    sparse_prompt_embeddings=self.distill_model.learned_sparse_embeddings,
-                    dense_prompt_embeddings=self.distill_model.learned_dense_embeddings,
-                    multimask_output=False,
-                )
-                mid_res_masks = v2.functional.resize(
-                    low_res_masks,
-                    out.shape[-1],
-                    v2.InterpolationMode.BICUBIC,
-                )
-            
-            student_resized = nn.functional.interpolate(
-                out_bottleneck,
-                size=(image_embedding.shape[-1], image_embedding.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
-
-            student_resized = nn.functional.interpolate(
-                out_bottleneck,
-                size=(image_embedding.shape[-1], image_embedding.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
-            up_feat = self.distill_adapter(student_resized)
-            distill_loss_emb = self.distill_loss(
-                student_logits=up_feat, teacher_logits=image_embedding
-            )
-            distill_loss_logits = self.distill_loss(
-                student_logits=out, teacher_logits=mid_res_masks.squeeze(1)
-            )
-
-            # print(f"distill_loss: {distill_loss}")
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "distill_loss_emb": distill_loss_emb["loss"].item(),
-                        "distill_loss_logits": distill_loss_logits["loss"].item(),
-                    },
-                    commit=False,
-                )
-
-            loss = loss + distill_loss_emb["loss"]
-
+    def _apply_auxiliary_losses(
+        self,
+        *,
+        loss: torch.Tensor | float,
+        logits: torch.Tensor,
+        masks: torch.Tensor | None,
+        organ_id: torch.Tensor | None = None,
+        forward_ctx: dict | None = None,
+        **kwargs,
+    ):
         self.steps_counter += 1
-        if self.use_shape:
-            reduced_masks = canonicalize_mask_batch_normalized(
-                masks, canon_res=self.shape_res
+        if not self.use_shape or masks is None:
+            return loss
+
+        projected_shapes = forward_ctx.get("projected_shapes", None)
+        if projected_shapes is None or projected_shapes.numel() == 0:
+            return loss
+
+        reduced_masks = canonicalize_mask_batch_normalized(
+            masks, canon_res=self.shape_res
+        )
+        loss_shape = torch.tensor([0.0], requires_grad=True).to(logits.device)
+        for projected_shape in projected_shapes:
+            loss_shape = loss_shape + self.criterion(projected_shape, reduced_masks)
+
+        loss_shape = loss_shape / projected_shapes.shape[0]
+        if wandb.run is not None:
+            wandb.log({"shape_loss": loss_shape.item()}, commit=False)
+        loss = loss + loss_shape
+
+        if self.steps_counter % 200 == 0:
+            with torch.no_grad():
+                proj_tokens = torch.sigmoid(
+                    self.shared_attn.shape_proj(
+                        self.shared_attn.shape_embed.weight[:8].clone().detach()
+                    )
+                    .reshape(8, self.shape_res, self.shape_res)
+                    .detach()
+                )
+            proj_tokens = (proj_tokens > 0.5).to(torch.float32)
+            proj_vis = (
+                proj_tokens.view(2, 4, self.shape_res, self.shape_res)
+                .permute(0, 2, 1, 3)
+                .reshape(self.shape_res * 2, self.shape_res * 4)
             )
-            loss_shape = torch.tensor([0.0], requires_grad=True).to(loss.device)
-            for projected_shape in projected_shapes:
-                loss_shape = loss_shape + self.criterion(projected_shape, reduced_masks)
+            wandb.log({"projected_tokens": wandb.Image(proj_vis.unsqueeze(0))})
+            print("log")
 
-            loss_shape = loss_shape / projected_shapes.shape[0]
-
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "shape_loss": loss_shape.item(),
-                    },
-                    commit=False,
-                )
-            loss = loss + loss_shape
-
-            if self.steps_counter % 200 == 0:
-                with torch.no_grad():
-                    proj_tokens = torch.sigmoid(
-                        self.shared_attn.shape_proj(
-                            self.shared_attn.shape_embed.weight[:8].clone().detach()
-                        )
-                        .reshape(8, self.shape_res, self.shape_res)
-                        .detach()
-                    ) 
-                proj_tokens = (proj_tokens > 0.5).to(torch.float32)
-                proj_vis = (
-                    proj_tokens.view(2, 4, self.shape_res, self.shape_res)   # (rows, cols, H, W)
-                    .permute(0, 2, 1, 3) # (rows, H, cols, W)
-                    .reshape(self.shape_res*2, self.shape_res*4)   # merge
-                )
-                wandb.log({'projected_tokens':wandb.Image(proj_vis.unsqueeze(0))})
-                print("log")
-        return {
-            "loss": loss,
-            "logits": out,
-            "labels": masks,
-            "organ_id": organ_id,
-            "organ_id_metric": organ_id_metric,
-        }
+        return loss

@@ -2,13 +2,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 import numpy as np
-import os, sys, wandb
+import wandb
 from torchvision.transforms import v2
-from utils.utils import organ_to_class_dict
-from utils.paths import *
-from segment_anything import sam_model_registry
-from copy import deepcopy
-from safetensors.torch import load_file
+from nets.unet_base import BaseUnet
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -285,50 +281,68 @@ class UpConvBlockFiLM(nn.Module):
         return x
 
 
-class UNet2DFiLM(nn.Module):
+class UNet2DFiLM(BaseUnet):
     def __init__(
         self,
-        in_channels,
-        num_classes,
-        n_organs,
-        size=32,
-        depth=3,
+        in_channels: int,
+        num_classes: int,
+        n_organs: int,
+        size: int = 32,
+        depth: int = 3,
+        *,
         film_start: int = 0,
-        use_film=True,
-        film_embed=64,
-        distill=False,
+        use_film: bool = True,
+        film_embed: int = 64,
+        distill: bool = False,
+        distill_unet: bool = False,
+        medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
+        unet_teacher_ckpt: str = "/media/disk1/US_FiLMUNet/checkpoints/unet5_attn/model.safetensors",
+        unet_teacher_kwargs: dict | None = None,
     ):
         """
         UNet with symmetric FiLM conditioning in encoder and decoder.
-
-        Args:
-            in_channels: Number of input channels
-            num_classes: Number of output classes
-            n_organs: Number of organ types for FiLM conditioning
-            size: Base number of channels
-            depth: Number of encoder/decoder levels
-            film_start: 0-based index of the encoder level where FiLM starts
-                       0  -> FiLM from the first encoder block
-                       k  -> encoder blocks [0..k-1] plain, [k..depth-1] FiLM
-                       >= depth -> no FiLM in encoder
-            use_film: If False, disables FiLM completely (uses plain Conv blocks)
         """
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = num_classes
-        self.size = size
-        self.depth = depth
+        super().__init__(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            n_organs=n_organs,
+            size=size,
+            depth=depth,
+            film_start=film_start,
+            use_film=use_film,
+            film_embed=film_embed,
+            distill=distill,
+            distill_unet=distill_unet,
+            medsam_teacher_ckpt=medsam_teacher_ckpt,
+            unet_teacher_ckpt=unet_teacher_ckpt,
+            unet_teacher_kwargs=unet_teacher_kwargs,
+        )
+
+    def _build_model(
+        self,
+        *,
+        film_start: int = 0,
+        use_film: bool = True,
+        film_embed: int = 64,
+        distill: bool = False,
+        distill_unet: bool = False,
+        medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
+        unet_teacher_ckpt: str = "./loggings/6c4b0a465d57/checkpoint-8000/model.safetensors",
+        unet_teacher_kwargs: dict | None = None,
+        **kwargs,
+    ):
+        if kwargs:
+            unknown = ", ".join(sorted(kwargs.keys()))
+            raise TypeError(f"Unexpected UNet2DFiLM kwargs: {unknown}")
+
         self.film_start = max(0, int(film_start))
-        self.use_film = use_film
-        self.n_organs = n_organs
-        self.film_embed = film_embed
-        self.distill = distill
+        self.use_film = bool(use_film)
+        self.film_embed = int(film_embed)
         self.criterion = DiceBCELoss()
 
         # ---------------- Encoder ----------------
         self.encoder = nn.ModuleDict()
 
-        # First encoder block
         if self.use_film and 0 >= self.film_start:
             self.encoder["0"] = DownConvBlockFiLM(
                 [self.in_channels, self.size],
@@ -341,7 +355,6 @@ class UNet2DFiLM(nn.Module):
                 [self.in_channels, self.size], [self.size, self.size * 2]
             )
 
-        # Remaining encoder blocks
         for i in range(1, self.depth):
             in_ch = [self.size * (2**i), self.size * (2**i)]
             out_ch = [self.size * (2**i), self.size * (2 ** (i + 1))]
@@ -351,7 +364,7 @@ class UNet2DFiLM(nn.Module):
                 self.encoder[key] = DownConvBlockFiLM(
                     in_ch,
                     out_ch,
-                    n_organs=n_organs,
+                    n_organs=self.n_organs,
                     emb_dim=self.film_embed,
                 )
             else:
@@ -362,7 +375,7 @@ class UNet2DFiLM(nn.Module):
             self.bottleneck = UpConvBlockFiLM(
                 [self.size * (2**self.depth), self.size * (2**self.depth)],
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
-                n_organs=n_organs,
+                n_organs=self.n_organs,
                 emb_dim=self.film_embed,
             )
         else:
@@ -371,12 +384,10 @@ class UNet2DFiLM(nn.Module):
                 [self.size * (2**self.depth), self.size * (2 ** (self.depth + 1))],
             )
 
-        # ---------------- Decoder (symmetric FiLM usage) ----------------
+        # ---------------- Decoder ----------------
         self.decoder = nn.ModuleDict()
 
         for i in range(self.depth, 1, -1):
-            # Determine if this decoder level should use FiLM
-            # Mirror the encoder: if encoder[i-1] uses FiLM, decoder[i-1] uses FiLM
             use_film_at_level = self.use_film and (i - 1) >= self.film_start
 
             if use_film_at_level:
@@ -386,7 +397,7 @@ class UNet2DFiLM(nn.Module):
                         self.size * (2**i),
                     ],
                     [self.size * (2**i), self.size * (2**i)],
-                    n_organs=n_organs,
+                    n_organs=self.n_organs,
                     emb_dim=self.film_embed,
                 )
             else:
@@ -398,12 +409,11 @@ class UNet2DFiLM(nn.Module):
                     [self.size * (2**i), self.size * (2**i)],
                 )
 
-        # Final decoder block (level 0)
         if self.use_film and 0 >= self.film_start:
             self.decoder["0"] = UpConvBlockFiLM(
                 [self.size * 4 + self.size * 2, self.size * 2],
                 [self.size * 2, self.size * 2],
-                n_organs=n_organs,
+                n_organs=self.n_organs,
                 up_conv=False,
                 emb_dim=self.film_embed,
             )
@@ -420,227 +430,48 @@ class UNet2DFiLM(nn.Module):
             conv_kwargs={"kernel_size": 1, "stride": 1, "padding": 0},
         )
 
-        if self.distill:
+        self._init_distillation(
+            distill=distill,
+            distill_unet=distill_unet,
+            medsam_teacher_ckpt=medsam_teacher_ckpt,
+            unet_teacher_ckpt=unet_teacher_ckpt,
+            unet_teacher_kwargs=unet_teacher_kwargs,
+        )
 
-
-            student_channels = 2048 // (2 ** (5 - self.depth))
-            student_spatial = 32 * (2 ** (5 - self.depth))
-
-            # Target: 256 channels, 64x64 (teacher output)
-            target_channels = 256
-            target_spatial = 64
-
-            # Calculate upsampling factor
-            spatial_factor = target_spatial // student_spatial
-            self.distill_adapter = nn.Conv2d(
-                student_channels, target_channels, kernel_size=1
-            )
-            sam_model = sam_model_registry["vit_b"](checkpoint=MEDSAM_BASE_WEIGHTS)
-            self.distill_model = MedSAM(
-                image_encoder=deepcopy(sam_model.image_encoder),
-                mask_decoder=deepcopy(sam_model.mask_decoder),
-                prompt_encoder=deepcopy(sam_model.prompt_encoder),
-                predict_bboxes=True,
-                freeze_image_encoder=0,
-            )
-            state_dict = load_file(
-                "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors"
-            )
-            self.distill_model.load_state_dict(state_dict)
-            load_result = self.distill_model.load_state_dict(state_dict)
-            for p in self.distill_model.parameters():
-                p.requires_grad = False
-            self.distill_model.eval()
-            print(f"Loaded MedSam teacher model and loaded weights:\n{load_result}")
-            self.distill_loss = DistillationLoss()
-
-    def _enc_forward(self, layer, x, organ_id):
-        """Helper to call encoder blocks with or without FiLM"""
+    def _encode(
+        self,
+        layer,
+        x,
+        organ_id=None,
+        forward_ctx=None,
+    ):
         if isinstance(layer, DownConvBlockFiLM):
             return layer(x, organ_id)
         else:
             return layer(x)
 
-    def _dec_forward(self, layer, x, organ_id):
-        """Helper to call decoder blocks with or without FiLM"""
+    def _decode(
+        self,
+        layer,
+        x,
+        organ_id=None,
+        forward_ctx=None,
+    ):
         if isinstance(layer, UpConvBlockFiLM):
             return layer(x, organ_id)
         else:
             return layer(x)
 
-    def _bottleneck_forward(self, x, organ_id):
-        """Helper to call bottleneck with or without FiLM"""
+    def _bottleneck(
+        self,
+        x,
+        organ_id=None,
+        forward_ctx=None,
+    ):
         if isinstance(self.bottleneck, UpConvBlockFiLM):
             return self.bottleneck(x, organ_id)
         else:
             return self.bottleneck(x)
-
-    def encode(self, x, organ_id):
-        """Encoder pass with skip connections"""
-        feat_list = []
-
-        # Padding if needed
-        pre_padding = (
-            (x.size(-1) % 2**self.depth != 0)
-            or (x.size(-2) % 2**self.depth != 0)
-            or (x.size(-3) % 2**self.depth != 0)
-        )
-        if pre_padding:
-            x, pads = pad_to_2d(x, 2**self.depth)
-        else:
-            pads = None
-
-        # First encoder block
-        out, feat = self._enc_forward(self.encoder["0"], x, organ_id)
-        feat_list.append(feat)
-
-        # Remaining encoder blocks
-        for key in list(self.encoder.keys())[1:]:
-            out, feat = self._enc_forward(self.encoder[key], out, organ_id)
-            feat_list.append(feat)
-
-        # Bottleneck
-        out = self._bottleneck_forward(out, organ_id)
-
-        return out, feat_list, pads
-
-    def decode(self, x, organ_id, out, feat_list, pads):
-        """Decoder pass with skip connections"""
-        # Decoder blocks
-        for key in self.decoder:
-            out = self._dec_forward(
-                self.decoder[key],
-                torch.cat((out, feat_list[int(key)]), dim=1),
-                organ_id,
-            )
-            del feat_list[int(key)]
-
-        # Output layer
-        out = self.out_layer(out)
-
-        # Remove padding if it was added
-        if pads is not None:
-            out = unpad_2d(out, pads)
-
-        return out
-
-    def forward(
-        self,
-        pixel_values,
-        organ_id=None,
-        labels=None,
-        masks=None,
-        bbox_coords=None,
-        organ_id_metric=None,
-        pixel_values_medsam=None,
-        **kwargs,  # ignored, for peft compatibility
-    ):
-        """
-        Full forward pass through the network.
-
-        Args:
-            pixel_values: Input images (B, C, H, W)
-            organ_id: Organ type IDs for FiLM conditioning (B,)
-            labels: Ground truth labels (optional)
-            masks: Ground truth masks (B, H, W)
-            bbox_coords: Bounding box coordinates (optional)
-        """
-        x = pixel_values
-        feat_list = []
-
-        # Check if padding is needed
-        pre_padding = (
-            (x.size(-1) % 2**self.depth != 0)
-            or (x.size(-2) % 2**self.depth != 0)
-            or (x.size(-3) % 2**self.depth != 0)
-        )
-        if pre_padding:
-            x, pads = pad_to_2d(x, 2**self.depth)
-
-        # Encoder
-        out, feat = self._enc_forward(self.encoder["0"], x, organ_id)
-        feat_list.append(feat)
-
-        for key in list(self.encoder.keys())[1:]:
-            out, feat = self._enc_forward(self.encoder[key], out, organ_id)
-            feat_list.append(feat)
-
-        # Bottleneck
-        out = self._bottleneck_forward(out, organ_id)
-        out_bottleneck = out
-        # Decoder
-        for key in self.decoder:
-            out = self._dec_forward(
-                self.decoder[key],
-                torch.cat((out, feat_list[int(key)]), dim=1),
-                organ_id,
-            )
-            del feat_list[int(key)]
-
-        # Output
-        out = self.out_layer(out)
-
-        if pre_padding:
-            out = unpad_2d(out, pads).squeeze(1)
-
-        # Calculate loss if masks are provided
-        if masks is not None:
-            loss = self.criterion(out, masks)
-        else:
-            loss = 0.0
-
-        if self.distill:
-
-            with torch.no_grad():
-                up_pixel_values = v2.functional.resize(
-                    pixel_values_medsam, 1024, v2.InterpolationMode.BICUBIC
-                )
-                image_embedding = self.distill_model.image_encoder(up_pixel_values)
-                image_pe = self.distill_model.prompt_encoder.get_dense_pe()
-                low_res_masks, _ = self.distill_model.mask_decoder(
-                    image_embeddings=image_embedding,
-                    image_pe=image_pe,
-                    sparse_prompt_embeddings=self.distill_model.learned_sparse_embeddings,
-                    dense_prompt_embeddings=self.distill_model.learned_dense_embeddings,
-                    multimask_output=False,
-                )
-                mid_res_masks = v2.functional.resize(
-                    low_res_masks,
-                    out.shape[-1],
-                    v2.InterpolationMode.BICUBIC,
-                )
-            student_resized = nn.functional.interpolate(
-                out_bottleneck,
-                size=(image_embedding.shape[-1], image_embedding.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
-            up_feat = self.distill_adapter(student_resized)
-            distill_loss_emb = self.distill_loss(
-                student_logits=up_feat, teacher_logits=image_embedding
-            )
-            distill_loss_logits = self.distill_loss(
-                student_logits=out, teacher_logits=mid_res_masks.squeeze(1)
-            )
-
-            # print(f"distill_loss: {distill_loss}")
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "distill_loss_emb": distill_loss_emb["loss"].item(),
-                        "distill_loss_logits": distill_loss_logits["loss"].item(),
-                    },
-                    commit=False,
-                )
-            loss = loss + (distill_loss_emb["loss"] + distill_loss_logits["loss"]) / 2
-
-        return {
-            "loss": loss,
-            "logits": out,
-            "labels": masks,
-            "organ_id": organ_id,
-            "organ_id_metric": organ_id_metric,
-        }
 
     def __str__(self):
         model_parameters = filter(lambda p: p.requires_grad, self.parameters())

@@ -225,7 +225,10 @@ class USdatasetOmni(Dataset):
             organ_id = organ_to_class_dict['unknown']
         
         image_normed_medsam = (image - image.min())/torch.clip(image.max() - image.min(), min=1e-8, max=None)
-        image_normed = v2.functional.normalize(image, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
+        if self.self_norm:
+            image_normed = self.normalize_tensor_zscore_ignore_black(image)
+        else:
+            image_normed = v2.functional.normalize(image, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
         sample = {
             "pixel_values": image_normed.to(torch.float),
             "pixel_values_medsam": image_normed_medsam.to(torch.float),
@@ -236,3 +239,35 @@ class USdatasetOmni(Dataset):
             "organ_id_metric": organ_id,
         }
         return sample
+
+    def normalize_tensor_zscore_ignore_black(
+        self, tensor: torch.Tensor, epsilon: float = 1e-8
+    ):
+        """
+        Z-score normalize a tensor, ignoring black pixels.
+
+        Returns:
+            Normalized tensor with mean≈0, std≈1 for non-black pixels
+        """
+        if tensor.dim() == 2:
+            mask = tensor > 0
+        elif tensor.dim() == 3:
+            mask = (
+                (tensor > 0).any(dim=0)
+                if tensor.shape[0] in [1, 3]
+                else (tensor > 0).any(dim=-1)
+            )
+
+        if mask.any():
+            valid_pixels = tensor[mask] if tensor.dim() == 2 else tensor[:, mask]
+            mean_val = valid_pixels.mean()
+            std_val = valid_pixels.std()
+
+            if std_val > epsilon:
+                normalized = (tensor - mean_val) / std_val
+            else:
+                normalized = tensor - mean_val
+        else:
+            normalized = tensor.clone()
+
+        return normalized

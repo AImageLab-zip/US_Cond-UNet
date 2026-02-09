@@ -64,26 +64,6 @@ def parse_args():
         type=str,
         default="",
     )    
-    # parser.add_argument(
-    #     "--self-id",
-    #     type=int,
-    #     default=0,
-    # )   
-    # parser.add_argument(
-    #     "--use-cluster-id",
-    #     type=int,
-    #     default=1,
-    # )   
-    # parser.add_argument(
-    #     "--enc-type",
-    #     type=str,
-    #     default="dino",
-    # )  
-    # parser.add_argument(
-    #     "--num-clusters",
-    #     type=int,
-    #     default=10,
-    # )
     parser.add_argument(
         "--id-dropout",
         type=float,
@@ -139,18 +119,13 @@ def parse_args():
         type=str,
         default=None,
     )    
-    # parser.add_argument(
-    #     "--film-embed",
-    #     type=int,
-    #     default=64,
-    # )    
-    # parser.add_argument(
-    #     "--film-autoembed",
-    #     type=int,
-    #     default=1,
-    # )
     parser.add_argument(
         "--distill",
+        type=int,
+        default=0,
+    )    
+    parser.add_argument(
+        "--distill-unet",
         type=int,
         default=0,
     )

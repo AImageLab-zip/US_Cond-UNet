@@ -1,13 +1,11 @@
 from argparse import Namespace
-from collections import defaultdict
 from copy import deepcopy
 from transformers.trainer import Trainer
 from transformers.training_args import TrainingArguments
 from data_classes.datasets import USdatasetOmni
 from torchvision.transforms import InterpolationMode, v2
 import torch, wandb, random
-from sklearn.metrics import accuracy_score
-from nets.cls_net import OmniClsCBAM
+from torchmetrics.functional.segmentation import dice_score
 from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
 from nets.unet_attn import UNet2DAttn
 from utils.paths import DATA_DIR
@@ -15,7 +13,6 @@ from utils.utils import organ_to_class_dict, multi_cls_labels_dict, generate_run
 import numpy as np
 from utils.utils import (
     get_sft_transforms,
-    compute_dsc,
     class_to_organ_dict,
     compute_nsd,
     mask_overlap_visualization,
@@ -24,70 +21,127 @@ from utils.stratified_splits import build_train_val_datasets
 from utils.paths import *
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 from pathlib import Path
-import pickle
 from accelerate import Accelerator
 from utils.sampler import BalancedHierarchicalSampler
 from transformers import TrainerCallback
 
 def compute_metrics(eval_pred):
     logits, _ = eval_pred
-    # logits, masks, organ_ids = logits  # logits/masks shape B, 512, 512
-    logits, masks, organ_ids, organ_id_metric = logits  # logits/masks shape B, 512, 512
+    logits, masks, organ_ids, organ_id_metric = logits
 
-    logits = v2.functional.resize(
-        torch.from_numpy(logits),
-        (masks.shape[-1], masks.shape[-1]),
-        interpolation=InterpolationMode.NEAREST,
-    ).numpy()
-    pred_th = (torch.sigmoid(torch.from_numpy(logits)) > 0.7).float()
-    pred_np = pred_th.cpu().numpy()
-    masks = (
-        (
-            v2.functional.resize(
-                torch.from_numpy(masks),
-                (masks.shape[-1], masks.shape[-1]),
-                interpolation=InterpolationMode.NEAREST,
-            )
-            > 0.5
-        )
-        .float()
-        .numpy()
-    )
-    random.seed(42)  # set seed for reproducibility
-    numbers = list(range(logits.shape[0]))
-    sampled = random.sample(numbers, 30)
+    # Process in smaller chunks to reduce peak memory
+    batch_size = logits.shape[0]
+    chunk_size = min(32, batch_size)  # Process 32 samples at a time
+    
+    dsc_scores_list = []
+    nsd_scores_list = []
     overlays = []
-    for s in sampled:
-        overlays.append(
-            mask_overlap_visualization(pred_th[s], torch.from_numpy(masks[s]))
+    
+    random.seed(42)
+    numbers = list(range(batch_size))
+    sampled = random.sample(numbers, min(30, batch_size))
+    sampled_set = set(sampled)
+    
+    for start_idx in range(0, batch_size, chunk_size):
+        end_idx = min(start_idx + chunk_size, batch_size)
+        
+        # Process chunk
+        logits_chunk = torch.from_numpy(logits[start_idx:end_idx])
+        masks_chunk = torch.from_numpy(masks[start_idx:end_idx])
+        
+        # Resize
+        logits_resized = v2.functional.resize(
+            logits_chunk,
+            (masks_chunk.shape[-1], masks_chunk.shape[-1]),
+            interpolation=InterpolationMode.NEAREST,
         )
-
-    organ_stats = defaultdict(lambda: {"dsc": [], "nsd": []})
-    gt_np = masks
-    for i, organ in enumerate(organ_id_metric):
-        dsc = compute_dsc(gt_np[i], pred_np[i])
-        nsd = compute_nsd(gt_np[i], pred_np[i], tolerance=1)
-        organ = class_to_organ_dict[organ]
-        organ_stats[organ]["dsc"].append(dsc)
-        organ_stats[organ]["nsd"].append(nsd)
-
+        pred_th_chunk = (torch.sigmoid(logits_resized) > 0.7).float()
+        
+        masks_resized = v2.functional.resize(
+            masks_chunk,
+            (masks_chunk.shape[-1], masks_chunk.shape[-1]),
+            interpolation=InterpolationMode.NEAREST,
+        )
+        masks_chunk = (masks_resized > 0.5).float()
+        
+        # Generate overlays only for sampled indices in this chunk
+        for local_idx in range(end_idx - start_idx):
+            global_idx = start_idx + local_idx
+            if global_idx in sampled_set:
+                overlay = mask_overlap_visualization(pred_th_chunk[local_idx], masks_chunk[local_idx])
+                overlays.append((global_idx, overlay))
+        
+        # Compute metrics for chunk
+        pred_idx_chunk = pred_th_chunk.squeeze(1).to(torch.long)
+        gt_idx_chunk = masks_chunk.squeeze(1).to(torch.long)
+        
+        # DSC
+        dsc_chunk = dice_score(
+            pred_idx_chunk,
+            gt_idx_chunk,
+            num_classes=2,
+            include_background=False,
+            average="micro",
+            input_format="index",
+            aggregation_level="samplewise",
+        )
+        dsc_chunk = torch.nan_to_num(dsc_chunk, nan=0.0).cpu().numpy()
+        dsc_scores_list.append(dsc_chunk)
+        
+        # NSD - compute per sample to avoid large intermediate arrays
+        pred_np_chunk = pred_idx_chunk.cpu().numpy()
+        gt_np_chunk = gt_idx_chunk.cpu().numpy()
+        
+        nsd_chunk = np.array(
+            [compute_nsd(gt_np_chunk[i], pred_np_chunk[i], tolerance=1) 
+             for i in range(pred_np_chunk.shape[0])],
+            dtype=np.float32,
+        )
+        nsd_scores_list.append(nsd_chunk)
+        
+        # Clear memory
+        del logits_chunk, masks_chunk, logits_resized, masks_resized
+        del pred_th_chunk, pred_idx_chunk, gt_idx_chunk, pred_np_chunk, gt_np_chunk
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # Concatenate results
+    dsc_scores = np.concatenate(dsc_scores_list)
+    nsd_scores = np.concatenate(nsd_scores_list)
+    
+    # Compute per-organ metrics
+    organ_ids = np.asarray(organ_id_metric)
     wandb_metrics = {}
-    for organ, lst in organ_stats.items():
-        dsc_m = float(np.mean(lst["dsc"]))
-        nsd_m = float(np.mean(lst["nsd"]))
-
-        wandb_metrics[f"dsc_{organ}"] = dsc_m
-        wandb_metrics[f"nsd_{organ}"] = nsd_m
-
+    
+    # Track DSC scores for non-unknown organs
+    dsc_values_for_mean = []
+    
+    for organ_id in np.unique(organ_ids):
+        organ_mask = organ_ids == organ_id
+        organ_name = class_to_organ_dict[int(organ_id)]
+        
+        dsc_mean = float(dsc_scores[organ_mask].mean())
+        nsd_mean = float(nsd_scores[organ_mask].mean())
+        
+        wandb_metrics[f"dsc_{organ_name}"] = dsc_mean
+        wandb_metrics[f"nsd_{organ_name}"] = nsd_mean
+        
+        # Collect DSC values for organs that are not "unknown"
+        if "unknown" not in organ_name.lower():
+            dsc_values_for_mean.append(dsc_mean)
+    
+    # Add overall mean DSC (excluding unknown)
+    if dsc_values_for_mean:
+        wandb_metrics["dsc_mean"] = float(np.mean(dsc_values_for_mean))
+    
+    # Log overlays
     if wandb.run is not None:
-        wandb_images = []
-        for i, s in enumerate(sampled):
-            wandb_images.append(wandb.Image(overlays[i], caption=f"overlap_{s}"))
-
+        # Sort by original index and log immediately to avoid holding all in memory
+        overlays.sort(key=lambda x: x[0])
+        wandb_images = [wandb.Image(overlay, caption=f"overlap_{idx}") 
+                       for idx, overlay in overlays]
         wandb.log({"overlays_eval": wandb_images}, commit=False)
-
+    
     return wandb_metrics
-
 
 def train(args: Namespace):
     if args.onpublic:
@@ -226,12 +280,12 @@ def train(args: Namespace):
             depth=args.unet_depth,
             attn_start=args.film_start,  # Start attention from first level
             use_attn=args.use_film,  # Enable attention
-            img_size=512,  # Input image size
+            img_size=args.dataset_size,  # Input image size
             patch_size=8,  # 16×16 patches → 256 patches total
             emb_dim=768,  # Embedding dimension
             n_heads=8,  # Number of attention heads
-            # n_transformer_layers = 12,
             distill=bool(args.distill),
+            distill_unet=bool(args.distill_unet),
             use_dwt=args.use_dwt,
             wavelet=args.wavelet,
             dwt_bands=args.dwt_bands,
@@ -247,7 +301,8 @@ def train(args: Namespace):
             depth=args.unet_depth,
             film_start=args.film_start,
             use_film=args.use_film,
-            distill = bool(args.distill)
+            distill = bool(args.distill),
+            distill_unet = bool(args.distill_unet),
         )
 
 
@@ -308,6 +363,7 @@ def train(args: Namespace):
         # push_to_hub=False,
     )
 
+    distill_steps = args.distill if bool(args.distill) else args.distill_unet
     trainer = CustomTrainerWithSampler(
         model=model,
         args=training_args,
@@ -315,7 +371,7 @@ def train(args: Namespace):
         eval_dataset=val_dataset,
         compute_metrics=compute_metrics,
         train_sampler=train_sampler,
-        callbacks=[DistillScheduleCallback(args.distill)]
+        callbacks=[DistillScheduleCallback(distill_steps)]
     )
     # trainer = CustomTrainerWithSampler(
     #     model=model,
@@ -371,9 +427,13 @@ class DistillScheduleCallback(TrainerCallback):
         if self.stop_step is None:
             return
         model = kwargs["model"]
-        if hasattr(model, "distill"):
+        if hasattr(model, "distill") and model.distill:
             if model.distill != (state.global_step < self.stop_step):
                 print("----------------DISTILLATION STOPPED-----------------")
 
             model.distill = state.global_step < self.stop_step
-        
+        elif hasattr(model, "distill_unet") and model.distill_unet:
+            if model.distill_unet != (state.global_step < self.stop_step):
+                print("----------------DISTILLATION STOPPED-----------------")
+
+            model.distill_unet = state.global_step < self.stop_step
