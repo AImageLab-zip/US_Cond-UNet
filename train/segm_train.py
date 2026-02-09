@@ -170,6 +170,7 @@ def train(args: Namespace):
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
+            self_norm=args.self_norm,
             skip_dataset=args.val_skip_dataset,
             id_dropout=0.0,
         )

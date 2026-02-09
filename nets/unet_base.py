@@ -174,7 +174,7 @@ class BaseUnet(nn.Module, ABC):
         distill: bool = False,
         distill_unet: bool = False,
         medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
-        unet_teacher_ckpt: str = "./loggings/6c4b0a465d57/checkpoint-8000/model.safetensors",
+        unet_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/unet5_attn/model.safetensors",
         unet_teacher_kwargs: dict | None = None,
     ):
         if distill and distill_unet:

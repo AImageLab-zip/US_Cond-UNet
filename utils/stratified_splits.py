@@ -67,6 +67,7 @@ def build_train_val_datasets(
         keep_aspect_ratio=args.keep_aspect_ratio,
         skip_dataset=args.train_skip_dataset,
         id_dropout=args.id_dropout,
+        self_norm=args.self_norm,
 
     )
 
