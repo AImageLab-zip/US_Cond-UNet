@@ -4,9 +4,11 @@ from torch.utils.data import Subset
 from data_classes.datasets import USdatasetOmni, organ_to_class_dict
 from torchvision.transforms import v2
 from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold
 from utils.utils import get_sft_transforms
 import copy
 
+DEFAULT_NUM_FOLDS = 3
 
 def set_all_seeds(seed: int = 42):
     random.seed(seed)
@@ -47,6 +49,32 @@ def stratified_80_20_indices(dataset, seed: int = 42):
         train_idx, val_idx = next(sss2.split(idx, organs))
         return train_idx.tolist(), val_idx.tolist()
 
+
+def stratified_kfold_indices(
+    dataset,
+    n_splits: int = DEFAULT_NUM_FOLDS,
+    fold_idx: int = 0,
+    seed: int = 42,
+):
+    if n_splits < 2:
+        raise ValueError(f"n_splits must be >= 2, got {n_splits}")
+    if not (0 <= fold_idx < n_splits):
+        raise ValueError(f"fold_idx must be in [0, {n_splits - 1}], got {fold_idx}")
+
+    strata, organs = make_strata(dataset)
+    idx = np.arange(len(dataset))
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    try:
+        splits = list(skf.split(idx, strata))
+    except ValueError as e:
+        print(f"[split] Falling back to organ-only KFold stratification because: {e}")
+        splits = list(skf.split(idx, organs))
+
+    train_idx, val_idx = splits[fold_idx]
+    return train_idx.tolist(), val_idx.tolist()
+
+
 def build_train_val_datasets(
     DATA_DIR,
     args,
@@ -71,8 +99,22 @@ def build_train_val_datasets(
 
     )
 
-    # 2) Get reproducible stratified indices (80/20)
-    tr_idx, va_idx = stratified_80_20_indices(train_full, seed=seed)
+    fold = int(getattr(args, "fold", 0))
+    if fold > 0:
+        if fold > DEFAULT_NUM_FOLDS:
+            raise ValueError(
+                f"--fold must be in [1, {DEFAULT_NUM_FOLDS}] or 0 to disable, got {fold}"
+            )
+        tr_idx, va_idx = stratified_kfold_indices(
+            train_full,
+            n_splits=DEFAULT_NUM_FOLDS,
+            fold_idx=fold - 1,
+            seed=seed,
+        )
+        print(f"[split] Using stratified {DEFAULT_NUM_FOLDS}-fold split: fold {fold}/{DEFAULT_NUM_FOLDS}")
+    else:
+        # 2) Default behavior: reproducible stratified indices (80/20)
+        tr_idx, va_idx = stratified_80_20_indices(train_full, seed=seed)
 
     # 3) Create Subset datasets (keep same transforms; you can add different aug for val if needed)
     train_dataset = Subset(train_full, tr_idx)
@@ -97,5 +139,4 @@ def build_train_val_datasets(
 
     print(f"[split] Total: {len(train_full)} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     return train_dataset, val_dataset
-
 

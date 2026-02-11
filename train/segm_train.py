@@ -175,17 +175,22 @@ def train(args: Namespace):
             id_dropout=0.0,
         )
     else:
-        train_dataset = USdatasetOmni(
-            DATA_DIR,
-            "train",
-            transforms=get_sft_transforms(train=True),
-            data_type=args.dataset_type,
-            out_size=args.dataset_size,
-            ccl_crop=args.use_ccl_crop,
-            keep_aspect_ratio=args.keep_aspect_ratio,
-            self_norm=args.self_norm,
-            id_dropout=args.id_dropout,
-        )
+        if int(getattr(args, "fold", 0)) > 0:
+            train_dataset, val_dataset = build_train_val_datasets(
+                DATA_DIR, args, seed=args.seed, id_file_name="train"
+            )
+        else:
+            train_dataset = USdatasetOmni(
+                DATA_DIR,
+                "train",
+                transforms=get_sft_transforms(train=True),
+                data_type=args.dataset_type,
+                out_size=args.dataset_size,
+                ccl_crop=args.use_ccl_crop,
+                keep_aspect_ratio=args.keep_aspect_ratio,
+                self_norm=args.self_norm,
+                id_dropout=args.id_dropout,
+            )
 
         # train_syn_dataset = USdatasetOmni(
         #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -202,18 +207,19 @@ def train(args: Namespace):
         # )
         # train_dataset = ConcatDataset([train_dataset, train_syn_dataset])
 
-        val_dataset = USdatasetOmni(
-            DATA_DIR,
-            "val",
-            transforms=get_sft_transforms(train=False),
-            data_type=args.dataset_type,
-            out_size=args.dataset_size,
-            ccl_crop=args.use_ccl_crop,
-            keep_aspect_ratio=args.keep_aspect_ratio,
-            self_norm=args.self_norm,
-            include_testicles=True,
-            id_dropout=0.0,
-        )
+        if int(getattr(args, "fold", 0)) <= 0:
+            val_dataset = USdatasetOmni(
+                DATA_DIR,
+                "val",
+                transforms=get_sft_transforms(train=False),
+                data_type=args.dataset_type,
+                out_size=args.dataset_size,
+                ccl_crop=args.use_ccl_crop,
+                keep_aspect_ratio=args.keep_aspect_ratio,
+                self_norm=args.self_norm,
+                include_testicles=True,
+                id_dropout=0.0,
+            )
         # train_dataset, val_dataset = build_train_val_datasets(
         #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     args,
@@ -365,6 +371,14 @@ def train(args: Namespace):
     )
 
     distill_steps = args.distill if bool(args.distill) else args.distill_unet
+    # trainer = Trainer(
+    #     model=model,
+    #     args=training_args,
+    #     train_dataset=train_dataset,
+    #     eval_dataset=val_dataset,
+    #     compute_metrics=compute_metrics,
+    #     callbacks=[DistillScheduleCallback(distill_steps)]
+    # )
     trainer = CustomTrainerWithSampler(
         model=model,
         args=training_args,

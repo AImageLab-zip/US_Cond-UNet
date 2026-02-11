@@ -261,6 +261,12 @@ def parse_args():
         default=None,
         help="",
     )
+    parser.add_argument(
+        "--fold",
+        type=int,
+        default=0,
+        help="One-based fold id for non-overlapping val split (use 1,2,3). Set 0 to disable.",
+    )
     args = parser.parse_args()
     if args.dwt_bands is not None:
         allowed = {"LL", "LH", "HL", "HH"}
