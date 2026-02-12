@@ -26,7 +26,7 @@ import numpy as np
 import pickle
 from typing import Literal, Optional, Union
 from torchvision.transforms import v2
-
+from functools import partial
 
 class USdatasetOmni(Dataset):
     def __init__(
@@ -34,7 +34,7 @@ class USdatasetOmni(Dataset):
         base_dir,
         split,
         transforms=None,
-        out_size=1024.0,
+        out_size=1024,
         data_type="both",
         ccl_crop=False,
         keep_aspect_ratio=True,

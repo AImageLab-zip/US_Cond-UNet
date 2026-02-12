@@ -165,7 +165,7 @@ def train(args: Namespace):
         test_dataset = USdatasetOmni(
             DATA_DIR,
             "val_cls",
-            transforms=get_sft_transforms(train=False),
+            transforms=get_sft_transforms(train=False, size =int(args.dataset_size)),
             data_type=args.dataset_type,
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
@@ -183,7 +183,7 @@ def train(args: Namespace):
             train_dataset = USdatasetOmni(
                 DATA_DIR,
                 "train",
-                transforms=get_sft_transforms(train=True),
+                transforms=get_sft_transforms(train=True, size =int(args.dataset_size)),
                 data_type=args.dataset_type,
                 out_size=args.dataset_size,
                 ccl_crop=args.use_ccl_crop,
@@ -211,7 +211,7 @@ def train(args: Namespace):
             val_dataset = USdatasetOmni(
                 DATA_DIR,
                 "val",
-                transforms=get_sft_transforms(train=False),
+                transforms=get_sft_transforms(train=False, size =int(args.dataset_size)),
                 data_type=args.dataset_type,
                 out_size=args.dataset_size,
                 ccl_crop=args.use_ccl_crop,
@@ -229,7 +229,7 @@ def train(args: Namespace):
         test_dataset = USdatasetOmni(
             DATA_DIR,
             "test",
-            transforms=get_sft_transforms(train=False),
+            transforms=get_sft_transforms(train=False, size =int(args.dataset_size) ),
             data_type=args.dataset_type,
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,

@@ -10,11 +10,13 @@ import copy
 
 DEFAULT_NUM_FOLDS = 3
 
+
 def set_all_seeds(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
 
 def make_strata(dataset):
     """
@@ -32,6 +34,7 @@ def make_strata(dataset):
     multi = np.asarray(multi, dtype=int)
     strata = np.array([f"{o}|{m}" for o, m in zip(organs, multi)])
     return strata, organs
+
 
 def stratified_80_20_indices(dataset, seed: int = 42):
     strata, organs = make_strata(dataset)
@@ -76,11 +79,7 @@ def stratified_kfold_indices(
 
 
 def build_train_val_datasets(
-    DATA_DIR,
-    args,
-    seed: int = 42,
-    get_sft_transforms_ = None,
-    id_file_name = 'train_cls'
+    DATA_DIR, args, seed: int = 42, get_sft_transforms_=None, id_file_name="train_cls"
 ):
     set_all_seeds(seed)
 
@@ -88,7 +87,11 @@ def build_train_val_datasets(
     train_full = USdatasetOmni(
         DATA_DIR,
         id_file_name,
-        transforms=get_sft_transforms(train=True) if get_sft_transforms_ is None else get_sft_transforms_(train=True),
+        transforms=(
+            get_sft_transforms(train=True, size=int(args.dataset_size))
+            if get_sft_transforms_ is None
+            else get_sft_transforms_(train=True, size=int(args.dataset_size))
+        ),
         data_type=args.dataset_type,
         out_size=args.dataset_size,
         ccl_crop=args.use_ccl_crop,
@@ -96,7 +99,6 @@ def build_train_val_datasets(
         skip_dataset=args.train_skip_dataset,
         id_dropout=args.id_dropout,
         self_norm=args.self_norm,
-
     )
 
     fold = int(getattr(args, "fold", 0))
@@ -111,7 +113,9 @@ def build_train_val_datasets(
             fold_idx=fold - 1,
             seed=seed,
         )
-        print(f"[split] Using stratified {DEFAULT_NUM_FOLDS}-fold split: fold {fold}/{DEFAULT_NUM_FOLDS}")
+        print(
+            f"[split] Using stratified {DEFAULT_NUM_FOLDS}-fold split: fold {fold}/{DEFAULT_NUM_FOLDS}"
+        )
     else:
         # 2) Default behavior: reproducible stratified indices (80/20)
         tr_idx, va_idx = stratified_80_20_indices(train_full, seed=seed)
@@ -133,10 +137,15 @@ def build_train_val_datasets(
     #     num_clusters = args.num_clusters,
     # )
     val_base = copy.deepcopy(train_full)
-    val_base.aug = get_sft_transforms(train=False) if get_sft_transforms_ is None else get_sft_transforms_(train=False)
+    val_base.aug = (
+        get_sft_transforms(train=False, size =int(args.dataset_size))
+        if get_sft_transforms_ is None
+        else get_sft_transforms_(train=False, size =int(args.dataset_size))
+    )
     val_base.id_dropout = 0.0
     val_dataset = Subset(val_base, va_idx)
 
-    print(f"[split] Total: {len(train_full)} | Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+    print(
+        f"[split] Total: {len(train_full)} | Train: {len(train_dataset)} | Val: {len(val_dataset)}"
+    )
     return train_dataset, val_dataset
-

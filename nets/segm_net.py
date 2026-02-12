@@ -484,46 +484,30 @@ class UNet2DFiLM(BaseUnet):
         )
 
 
+
 class DiceBCELoss(nn.Module):
     def __init__(self, dice_weight: float = 1.0, bce_weight: float = 1.0):
         super().__init__()
         self.dice_weight = dice_weight
         self.bce_weight = bce_weight
-        self.eps = 1e-7  # Safe for bf16, will be adjusted for fp16
+        self.eps = 1e-6
 
     def forward(self, logits: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-        # Adjust epsilon based on dtype
-        eps = 1e-4 if logits.dtype == torch.float16 else self.eps
 
-        # Create mask for valid samples (not all -100)
-        valid_mask = (gt != -100).any(dim=tuple(range(1, gt.dim())))  # [B]
-
-        # If no valid samples, return zero loss
-        if not valid_mask.any():
-            return logits.sum() * 0.0
-
-        # Filter out invalid samples
-        logits = logits[valid_mask]
-        gt = gt[valid_mask]
-
-        # Replace -100 with 0 for any remaining -100 values (partial masks)
-        gt = gt.clone()
-        gt[gt == -100] = 0
         gt = gt.float()
 
-        # BCE loss
         bce = F.binary_cross_entropy_with_logits(
             logits.squeeze(), gt.squeeze(), reduction="mean"
         )
 
         # Soft Dice loss
         probs = torch.sigmoid(logits)
-        dims = tuple(range(2, probs.dim()))  # (H, W) or (D, H, W)
+        dims = tuple(range(2, probs.dim()))  # (H, W)  or (D,H,W)
 
-        # per-class Dice, per-sample
+        # per‑class Dice, per‑sample
         inter = (probs * gt).sum(dims) * 2
         union = probs.sum(dims) + gt.sum(dims)
-        dice = 1 - (inter + eps) / (union + eps)  # [B, C]
+        dice = 1 - (inter + self.eps) / (union + self.eps)  # [B, C]
 
         dice = dice.mean()
 

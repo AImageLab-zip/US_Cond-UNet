@@ -304,12 +304,16 @@ def generate_run_hash(args: Namespace) -> str:
     return f"./loggings/{hash_object.hexdigest()[:12]}"
 
 
-def get_sft_transforms(train: bool):
+def get_sft_transforms(train: bool, size=512):
     """Get image transforms for training/validation"""
     if train:
         return v2.Compose(
             [
                 v2.RandomHorizontalFlip(p=0.5),
+                v2.RandomApply(
+                    [v2.RandomResizedCrop(size=size, scale= (0.7, 1.3))],
+                    p=0.7,
+                ),                
                 v2.RandomApply(
                     [v2.RandomAffine(degrees=8, shear=10)],
                     p=0.5,
