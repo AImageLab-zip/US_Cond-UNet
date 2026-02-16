@@ -314,10 +314,10 @@ def get_sft_transforms(train: bool, size=512):
                     [v2.RandomResizedCrop(size=size, scale= (0.7, 1.3))],
                     p=0.7,
                 ),                
-                v2.RandomApply(
-                    [v2.RandomAffine(degrees=8, shear=10)],
-                    p=0.5,
-                ),
+                # v2.RandomApply(
+                #     [v2.RandomAffine(degrees=8, shear=10)],
+                #     p=0.5,
+                # ),
                 v2.ColorJitter(brightness=0.4, contrast=0.4),
                 v2.ToDtype(torch.float32, scale=False),
             ]
