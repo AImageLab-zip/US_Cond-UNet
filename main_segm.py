@@ -94,7 +94,10 @@ def parse_args():
         default=1,
     ) 
     parser.add_argument(
-        "--unet-depth", help="number of stage in the uner", type=int, default=5
+        "--unet-depth", help="number of stage in the unet", type=int, default=5
+    )    
+    parser.add_argument(
+        "--unet-size", help="", type=int, default=32
     )
     parser.add_argument(
         "--unet-attn", help="", type=int, default=0

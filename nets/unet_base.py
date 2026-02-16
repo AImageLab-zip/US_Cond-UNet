@@ -191,7 +191,8 @@ class BaseUnet(nn.Module, ABC):
 
         from nets.segm_net import DistillationLoss, MedSAM
 
-        student_channels = 2048 // (2 ** (5 - self.depth))
+        student_channels = (2048 // (32 // self.size)) // (2 ** (5 - self.depth))
+
         if self.distill:
             self.distill_adapter = nn.Conv2d(student_channels, 256, kernel_size=1)
         else:
