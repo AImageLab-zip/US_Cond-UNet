@@ -65,11 +65,6 @@ def parse_args():
         default="",
     )    
     parser.add_argument(
-        "--id-dropout",
-        type=float,
-        default=0.0,
-    )
-    parser.add_argument(
         "--train-skip-dataset",
         type=str,
         default="",
@@ -265,10 +260,10 @@ def parse_args():
         help="",
     )
     parser.add_argument(
-        "--fold",
+        "--selfaug",
         type=int,
-        default=0,
-        help="One-based fold id for non-overlapping val split (use 1,2,3). Set 0 to disable.",
+        default=1,
+        help="Enable self-augmentation pair generation and transform-difference prediction.",
     )
     args = parser.parse_args()
     if args.dwt_bands is not None:

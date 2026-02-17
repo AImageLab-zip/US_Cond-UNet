@@ -7,6 +7,8 @@ from torch import nn
 from torchvision.transforms import v2
 import wandb
 
+from utils.utils import SSObjective, load_ss_predictor
+
 
 class BaseUnet(nn.Module, ABC):
     def __init__(
@@ -16,7 +18,7 @@ class BaseUnet(nn.Module, ABC):
         n_organs: int,
         size: int = 32,
         depth: int = 3,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -29,6 +31,8 @@ class BaseUnet(nn.Module, ABC):
         self.distill_model = None
         self.distill_adapter = None
         self.distill_loss = None
+        self.use_selfaug = False
+
         self._build_model(**kwargs)
 
     @staticmethod
@@ -168,6 +172,52 @@ class BaseUnet(nn.Module, ABC):
     ):
         return loss
 
+    def _init_selfaug(self, *, use_selfaug=False):
+        self.use_selfaug = use_selfaug
+        if self.use_selfaug:
+            self.ss_objective = SSObjective(
+                crop=0.5,
+                color=0.5,
+                flip=0.5,
+                blur=-1,
+                rot=-1,
+                sol=-1,
+            )
+            student_channels = (2048 // (32 // self.size)) // (2 ** (5 - self.depth))
+            self.ss_predictor = load_ss_predictor(student_channels, self.ss_objective)
+
+    def _forward_selfaug(self, *, x: torch.Tensor, out_bottleneck: torch.Tensor, crop: torch.Tensor, flip: torch.Tensor,jit: torch.Tensor,):
+        if self.use_selfaug:
+            for k, v in self.ss_predictor.items():
+                v.to(x.device)
+            diff1 = {}
+            diff2 = {}
+            diff1["crop"] = crop[:, 0, :]
+            diff2["crop"] = crop[:, 1, :]
+            diff1["flip"] = flip[:, 0, :]
+            diff2["flip"] = flip[:, 1, :]
+            diff1["color"] = jit[:, 0, :]
+            diff2["color"] = jit[:, 1, :]
+            y1 = out_bottleneck[: x.size(0) // 2]
+            y2 = out_bottleneck[x.size(0) // 2 :]
+            loss_selfaug = self.ss_objective(
+                self.ss_predictor,
+                nn.functional.adaptive_avg_pool2d(y1, (1, 1)).flatten(1),
+                nn.functional.adaptive_avg_pool2d(y2, (1, 1)).flatten(1),
+                diff1,
+                diff2,
+            )
+            wandb_dict = {}
+            for k, v in loss_selfaug.items():
+                wandb_dict[k] = v.item()
+                # loss = loss + v
+            if wandb.run is not None:
+                wandb.log(wandb_dict, commit=False)
+            
+            return loss_selfaug['total']
+        else:
+            return None
+    
     def _init_distillation(
         self,
         *,
@@ -304,11 +354,11 @@ class BaseUnet(nn.Module, ABC):
             )
 
         student_resized = F.interpolate(
-                student_bottleneck,
-                size=(teacher_embedding.shape[-1], teacher_embedding.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
+            student_bottleneck,
+            size=(teacher_embedding.shape[-1], teacher_embedding.shape[-1]),
+            mode="bilinear",
+            align_corners=False,
+        )
         up_feat = self.distill_adapter(student_resized)
         distill_loss_emb = self.distill_loss(
             student_logits=student_bottleneck,
@@ -327,13 +377,23 @@ class BaseUnet(nn.Module, ABC):
         organ_id=None,
         labels=None,
         masks=None,
-        bbox_coords=None,
         organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
         pixel_values_medsam=None,
+        crop=None,
+        flip=None,
+        jit=None,
         **kwargs,
     ):
+
+        if pixel_values.dim() > 4:
+            pixel_values = torch.cat([pixel_values[:, 0], pixel_values[:, 1]])
+            masks = torch.cat([masks[:, 0], masks[:, 1]])
+            organ_id = torch.cat([organ_id, organ_id])
+            pixel_values_medsam = torch.cat([pixel_values_medsam, pixel_values_medsam])
+
+            if organ_id_metric is not None:
+                organ_id_metric = torch.cat([organ_id_metric, organ_id_metric])
+
         forward_ctx = self._prepare_forward(
             pixel_values=pixel_values,
             organ_id=organ_id,
@@ -367,6 +427,17 @@ class BaseUnet(nn.Module, ABC):
         if distill_loss is not None:
             loss = loss + distill_loss
 
+        selfaug_loss = self._forward_selfaug(
+            x=pixel_values,
+            out_bottleneck=out_bottleneck,
+            crop=crop,
+            flip=flip,
+            jit=jit,
+        )
+        if selfaug_loss is not None:
+            # print(f"selfaug_loss:{selfaug_loss.item()}")
+            loss = loss + selfaug_loss
+        
         loss = self._apply_auxiliary_losses(
             loss=loss,
             logits=out,

@@ -6,6 +6,7 @@ import wandb
 from torchvision.transforms import v2
 from nets.unet_base import BaseUnet
 
+
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
 
@@ -298,6 +299,7 @@ class UNet2DFiLM(BaseUnet):
         medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
         unet_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/unet5_attn/model.safetensors",
         unet_teacher_kwargs: dict | None = None,
+        use_selfaug: bool = False,
     ):
         """
         UNet with symmetric FiLM conditioning in encoder and decoder.
@@ -316,6 +318,7 @@ class UNet2DFiLM(BaseUnet):
             medsam_teacher_ckpt=medsam_teacher_ckpt,
             unet_teacher_ckpt=unet_teacher_ckpt,
             unet_teacher_kwargs=unet_teacher_kwargs,
+            use_selfaug=use_selfaug,
         )
 
     def _build_model(
@@ -329,6 +332,7 @@ class UNet2DFiLM(BaseUnet):
         medsam_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/medsam_unfreezed/model.safetensors",
         unet_teacher_ckpt: str = "/work/phd_ultrasounds/UUSIC_new/checkpoints/unet5_attn/model.safetensors",
         unet_teacher_kwargs: dict | None = None,
+        use_selfaug: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -338,6 +342,7 @@ class UNet2DFiLM(BaseUnet):
         self.film_start = max(0, int(film_start))
         self.use_film = bool(use_film)
         self.film_embed = int(film_embed)
+        self.use_selfaug = bool(use_selfaug)
         self.criterion = DiceBCELoss()
 
         # ---------------- Encoder ----------------
@@ -437,6 +442,10 @@ class UNet2DFiLM(BaseUnet):
             unet_teacher_ckpt=unet_teacher_ckpt,
             unet_teacher_kwargs=unet_teacher_kwargs,
         )
+        
+        self._init_selfaug(
+            use_selfaug=self.use_selfaug
+        )
 
     def _encode(
         self,
@@ -482,7 +491,6 @@ class UNet2DFiLM(BaseUnet):
             super().__str__() + f"\nTrainable parameters: {params}"
             f"\nFiLM: {film_status} ({film_range})"
         )
-
 
 
 class DiceBCELoss(nn.Module):
@@ -664,6 +672,7 @@ class DistillationLoss(nn.Module):
             "loss": loss,
         }
 
+
 class MedSAMPrompt(nn.Module):
     def __init__(
         self,
@@ -672,7 +681,7 @@ class MedSAMPrompt(nn.Module):
         prompt_encoder,
         freeze_image_encoder=True,
         predict_bboxes=False,
-        n_organs = 1
+        n_organs=1,
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -694,7 +703,7 @@ class MedSAMPrompt(nn.Module):
 
         # Learnable prompt embeddings (no input required)
         self.sparse_embeddings = nn.Parameter(torch.randn(1, 2, 256))
-        self.dense_embeddings  = nn.Embedding(n_organs + 1, 1 * 256 * 64 * 64)
+        self.dense_embeddings = nn.Embedding(n_organs + 1, 1 * 256 * 64 * 64)
 
         # self.sparse_embeddings = nn.ParameterDict(
         #     {
@@ -740,12 +749,10 @@ class MedSAMPrompt(nn.Module):
             raise ValueError("organ_id must be provided for selecting embeddings.")
 
         sparse_emb_list, dense_emb_list = [], []
-        
-
 
         mask = organ_id >= 0  # [B]
         idx = torch.where(mask, organ_id, self.dense_embeddings.weight.shape[0] - 1)
-        dense_embeddings  = self.dense_embeddings(idx).view(B, 256, 64, 64)
+        dense_embeddings = self.dense_embeddings(idx).view(B, 256, 64, 64)
 
         # Get positional encoding
         image_pe = self.prompt_encoder.get_dense_pe()  # (1, 256, 64, 64)

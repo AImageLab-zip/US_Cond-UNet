@@ -623,6 +623,7 @@ class UNet2DAttn(BaseUnet):
         dwt_bands: list[str] | None = None,
         use_shape: bool = False,
         shape_res: int = 64,
+        use_selfaug: bool = False,
     ):
         """
         Args:
@@ -660,6 +661,8 @@ class UNet2DAttn(BaseUnet):
             dwt_bands=dwt_bands,
             use_shape=use_shape,
             shape_res=shape_res,
+            use_selfaug=use_selfaug,
+
         )
 
     def _build_model(
@@ -681,6 +684,7 @@ class UNet2DAttn(BaseUnet):
         dwt_bands: list[str] | None = None,
         use_shape: bool = False,
         shape_res: int = 64,
+        use_selfaug: bool = False,
         **kwargs,
     ):
         if kwargs:
@@ -690,6 +694,7 @@ class UNet2DAttn(BaseUnet):
         self.attn_start = max(0, int(attn_start))
         self.use_attn = bool(use_attn)
         self.use_shape = bool(use_shape)
+        self.use_selfaug = bool(use_selfaug)
         self.img_size = int(img_size)
         self.shape_res = int(shape_res)
         self.criterion = DiceBCELoss()
@@ -810,6 +815,9 @@ class UNet2DAttn(BaseUnet):
             medsam_teacher_ckpt=medsam_teacher_ckpt,
             unet_teacher_ckpt=unet_teacher_ckpt,
             unet_teacher_kwargs=unet_teacher_kwargs,
+        )
+        self._init_selfaug(
+            use_selfaug=self.use_selfaug
         )
 
     def _build_layer_configs(self):

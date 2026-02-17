@@ -235,7 +235,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             skip_dataset=args.val_skip_dataset,
-            id_dropout=0.0,
+            use_selfaug=args.selfaug,
         )
     else:
         if int(getattr(args, "fold", 0)) > 0:
@@ -252,7 +252,7 @@ def train(args: Namespace):
                 ccl_crop=args.use_ccl_crop,
                 keep_aspect_ratio=args.keep_aspect_ratio,
                 self_norm=args.self_norm,
-                id_dropout=args.id_dropout,
+                use_selfaug=args.selfaug,
             )
 
         # train_syn_dataset = USdatasetOmni(
@@ -281,7 +281,7 @@ def train(args: Namespace):
                 keep_aspect_ratio=args.keep_aspect_ratio,
                 self_norm=args.self_norm,
                 include_testicles=True,
-                id_dropout=0.0,
+                use_selfaug=args.selfaug,
             )
         # train_dataset, val_dataset = build_train_val_datasets(
         #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
@@ -299,7 +299,7 @@ def train(args: Namespace):
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
             include_testicles=True,
-            id_dropout=0.0,
+            use_selfaug=args.selfaug,
         )
 
     print(
@@ -361,6 +361,7 @@ def train(args: Namespace):
             dwt_bands=args.dwt_bands,
             use_shape=args.use_shape,
             shape_res=args.shape_res,
+            use_selfaug=args.selfaug,
         )
     else:
         model = UNet2DFiLM(
@@ -373,6 +374,7 @@ def train(args: Namespace):
             use_film=args.use_film,
             distill = bool(args.distill),
             distill_unet = bool(args.distill_unet),
+            use_selfaug=args.selfaug,
         )
 
 

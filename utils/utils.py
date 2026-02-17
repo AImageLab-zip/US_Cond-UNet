@@ -1,16 +1,13 @@
 from argparse import Namespace
-import hashlib, random
-import time
+import hashlib, random, math, time, cv2, torch
 import numpy as np
-import cv2
 from PIL import Image
 from typing import Any, Dict, Optional, Union, Tuple
-import torch
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 from scipy.ndimage import distance_transform_edt
 from skimage.segmentation import find_boundaries
-from sklearn.model_selection import StratifiedShuffleSplit
+from torch import nn
 
 organ_to_class_dict_for_prediction = {
     "appendix": 0,
@@ -401,3 +398,85 @@ def mask_overlap_visualization(pred: torch.Tensor, mask: torch.Tensor):
     vis[2][fp] = 0  # B
 
     return vis
+
+
+# Code adapted from:
+# https://github.com/hankook/AugSelf/
+
+from torch.nn import functional as F
+
+
+class SSObjective:
+    def __init__(self, crop=-1, color=-1, flip=-1, blur=-1, rot=-1, sol=-1, only=False):
+        self.only = only
+        self.params = [
+            ("crop", crop, 4, "regression"),
+            ("color", color, 2, "regression"),
+            ("flip", flip, 1, "binary_classification"),
+            ("blur", blur, 1, "regression"),
+            ("rot", rot, 4, "classification"),
+            ("sol", sol, 1, "regression"),
+        ]
+
+    def __call__(self, ss_predictor, z1, z2, d1, d2, symmetric=True):
+        if symmetric:
+            z = torch.cat([torch.cat([z1, z2], 1), torch.cat([z2, z1], 1)], 0)
+            d = {k: torch.cat([d1[k], d2[k]], 0) for k in d1.keys()}
+        else:
+            z = torch.cat([z1, z2], 1)
+            d = d1
+
+        losses = {"total": 0}
+        for name, weight, n_out, loss_type in self.params:
+            if weight <= 0:
+                continue
+
+            p = ss_predictor[name](z)
+            if loss_type == "regression":
+                losses[name] = F.mse_loss(torch.tanh(p), d[name])
+            elif loss_type == "binary_classification":
+                losses[name] = F.binary_cross_entropy_with_logits(p, d[name])
+            elif loss_type == "classification":
+                losses[name] = F.cross_entropy(p, d[name])
+            losses["total"] += losses[name] * weight
+
+        return losses
+
+
+def load_ss_predictor(n_in, ss_objective, n_hidden=512):
+    ss_predictor = {}
+    for name, weight, n_out, _ in ss_objective.params:
+        if weight > 0:
+            ss_predictor[name] = load_mlp(
+                n_in * 2, n_hidden, n_out, num_layers=3, last_bn=False
+            )
+
+    return nn.ModuleDict(ss_predictor)
+
+
+def load_mlp(n_in, n_hidden, n_out, num_layers=3, last_bn=True):
+    layers = []
+    for i in range(num_layers - 1):
+        layers.append(nn.Linear(n_in, n_hidden, bias=False))
+        layers.append(nn.BatchNorm1d(n_hidden))
+        layers.append(nn.ReLU())
+        n_in = n_hidden
+    layers.append(nn.Linear(n_hidden, n_out, bias=not last_bn))
+    if last_bn:
+        layers.append(nn.BatchNorm1d(n_out))
+    mlp = nn.Sequential(*layers)
+    reset_parameters(mlp)
+    return mlp
+
+
+def reset_parameters(model):
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            m.reset_parameters()
+
+        if isinstance(m, nn.Linear):
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+            bound = 1 / math.sqrt(fan_in)
+            nn.init.uniform_(m.weight, -bound, bound)
+            if m.bias is not None:
+                nn.init.uniform_(m.bias, -bound, bound)

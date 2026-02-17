@@ -72,8 +72,8 @@ def build_train_val_datasets(
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
         skip_dataset=args.train_skip_dataset,
-        id_dropout=args.id_dropout,
         self_norm=args.self_norm,
+        use_selfaug=args.selfaug,
     )
 
     fold = int(getattr(args, "fold", 0))
@@ -101,7 +101,6 @@ def build_train_val_datasets(
         if get_sft_transforms_ is None
         else get_sft_transforms_(train=False, size =int(args.dataset_size))
     )
-    val_base.id_dropout = 0.0
     val_dataset = Subset(val_base, va_idx)
 
     print(
