@@ -1,3 +1,4 @@
+from nnunet.network_architecture.generic_UNet import Generic_UNet
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -5,6 +6,7 @@ import numpy as np
 import wandb
 from torchvision.transforms import v2
 from nets.unet_base import BaseUnet
+
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -484,7 +486,6 @@ class UNet2DFiLM(BaseUnet):
         )
 
 
-
 class DiceBCELoss(nn.Module):
     def __init__(self, dice_weight: float = 1.0, bce_weight: float = 1.0):
         super().__init__()
@@ -664,6 +665,7 @@ class DistillationLoss(nn.Module):
             "loss": loss,
         }
 
+
 class MedSAMPrompt(nn.Module):
     def __init__(
         self,
@@ -672,7 +674,7 @@ class MedSAMPrompt(nn.Module):
         prompt_encoder,
         freeze_image_encoder=True,
         predict_bboxes=False,
-        n_organs = 1
+        n_organs=1,
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -694,7 +696,7 @@ class MedSAMPrompt(nn.Module):
 
         # Learnable prompt embeddings (no input required)
         self.sparse_embeddings = nn.Parameter(torch.randn(1, 2, 256))
-        self.dense_embeddings  = nn.Embedding(n_organs + 1, 1 * 256 * 64 * 64)
+        self.dense_embeddings = nn.Embedding(n_organs + 1, 1 * 256 * 64 * 64)
 
         # self.sparse_embeddings = nn.ParameterDict(
         #     {
@@ -740,12 +742,10 @@ class MedSAMPrompt(nn.Module):
             raise ValueError("organ_id must be provided for selecting embeddings.")
 
         sparse_emb_list, dense_emb_list = [], []
-        
-
 
         mask = organ_id >= 0  # [B]
         idx = torch.where(mask, organ_id, self.dense_embeddings.weight.shape[0] - 1)
-        dense_embeddings  = self.dense_embeddings(idx).view(B, 256, 64, 64)
+        dense_embeddings = self.dense_embeddings(idx).view(B, 256, 64, 64)
 
         # Get positional encoding
         image_pe = self.prompt_encoder.get_dense_pe()  # (1, 256, 64, 64)
@@ -773,5 +773,58 @@ class MedSAMPrompt(nn.Module):
             "organ_id_metric": organ_id_metric,
         }
 
+
+
+class nnUnetWrapper(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.nnunet = Generic_UNet(
+            input_channels=3,
+            base_num_features=48,
+            num_classes=1,
+            num_pool=5,
+            num_conv_per_stage=2,
+            feat_map_mul_on_downscale=2,
+            conv_op=nn.Conv2d,
+            norm_op=nn.InstanceNorm2d,
+            norm_op_kwargs={"eps": 1e-5, "affine": True},
+            dropout_op=nn.Dropout2d,
+            dropout_op_kwargs={"p": 0.0, "inplace": True},
+            nonlin=nn.LeakyReLU,
+            nonlin_kwargs={"negative_slope": 1e-2, "inplace": True},
+            deep_supervision=False,
+            dropout_in_localization=False,
+            final_nonlin=nn.Identity(),
+            convolutional_pooling=True,
+            convolutional_upsampling=True,
+            max_num_features=1024,
+        )
+        self.criterion = DiceBCELoss()
+
+    def forward(
+        self,
+        pixel_values,
+        organ_id=None,
+        labels=None,
+        masks=None,
+        bbox_coords=None,
+        organ_id_metric=None,
+        teacher_embedding=None,
+        teacher_mask=None,
+        pixel_values_medsam=None,
+    ): 
+        out = self.nnunet(pixel_values).squeeze(1)
+        if masks is not None:
+            loss = self.criterion(out, masks)
+        else:
+            loss = 0.0
+        
+        return {
+            "loss": loss,
+            "logits": out,
+            "labels": masks,
+            "organ_id": organ_id,
+            "organ_id_metric": organ_id_metric,
+        }
 
 # config = {"in_channels": 3,"num_classes": 1,"n_organs": 8,"size": 32,"depth": 5,"film_start": 0,"use_film": 1}
