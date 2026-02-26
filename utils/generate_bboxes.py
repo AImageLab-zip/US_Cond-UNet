@@ -16,8 +16,6 @@ Usage
 -----
 
     python generate_bboxes.py \
-        --seg_root /work/tesi_nmorelli/UUSIC/challenge/baseline/data/segmentation \
-        --data_root /work/tesi_nmorelli/UUSIC/challenge/baseline/data \
         --mask_ext png jpg \
         --seed 42
 
