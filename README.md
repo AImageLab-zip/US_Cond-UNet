@@ -24,7 +24,7 @@ Each image is paired with a **pixel-wise expert-annotated segmentation mask**. T
 - Robustness benchmarking  
 
 **Summary**
-- Images: 1,054  
+- Images: 1,053  
 - Institutions: 2  
 - Modality: Ultrasound  
 - Annotations: Expert pixel-wise masks  
@@ -34,4 +34,4 @@ Each image is paired with a **pixel-wise expert-annotated segmentation mask**. T
 
 The inference with our pre Trained model will be made availble after review process via official huuggingface hub
 
-Anyway for [here]() there are the official weights of our flagship model 
+Anyway for [here](https://drive.google.com/file/d/1OyrYZPLbzdz237WhMWQapaZWUyTn2LEZ/view?usp=sharing) there are the official weights of our flagship model 
