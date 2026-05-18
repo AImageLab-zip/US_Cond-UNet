@@ -106,6 +106,11 @@ def parse_args():
         "--use-medsam",
         type=int,
         default=0,
+    )       
+    parser.add_argument(
+        "--use-nnunet",
+        type=int,
+        default=0,
     )     
     parser.add_argument(
         "--use-medsam-prompt",

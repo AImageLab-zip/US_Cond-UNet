@@ -6,7 +6,7 @@ from data_classes.datasets import USdatasetOmni
 from torchvision.transforms import InterpolationMode, v2
 import torch, wandb, random
 from torchmetrics.functional.segmentation import dice_score
-from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
+from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt, nnUnetWrapper
 from nets.unet_attn import UNet2DAttn
 from utils.paths import DATA_DIR
 from utils.utils import organ_to_class_dict, multi_cls_labels_dict, generate_run_hash
@@ -343,6 +343,8 @@ def train(args: Namespace):
         )
         model.cuda()
 
+    elif args.use_nnunet:
+        model = nnUnetWrapper()
     elif args.unet_attn:
         model = UNet2DAttn(
             in_channels=3,
