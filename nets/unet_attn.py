@@ -392,6 +392,7 @@ class SharedAttnModulator(nn.Module):
         original_img: torch.Tensor,
         organ_id: torch.Tensor,
         layer_configs: list[tuple[int, int]],
+        return_compact: bool = False,
     ):
         """
         Compute gamma and beta for all layers at once.
@@ -403,6 +404,8 @@ class SharedAttnModulator(nn.Module):
 
         Returns:
             dict: {layer_id: (gamma, beta)} where gamma/beta are (B, C, 1, 1)
+            If return_compact=True, also returns raw (gamma_max, beta_max) per layer
+            before channel pooling, each shaped (B, max_channels).
         """
         B = original_img.shape[0]
 
@@ -410,6 +413,7 @@ class SharedAttnModulator(nn.Module):
         patches = self.patch_embed(original_img)  # (B, N, D)
 
         modulations = {}
+        compact_modulations = {} if return_compact else None
         projected_shapes = []
         for layer_id, n_channels in layer_configs:
             # Get layer embedding
@@ -483,6 +487,9 @@ class SharedAttnModulator(nn.Module):
 
             beta_max, gamma_max = gamma_beta.chunk(2, dim=-1)  # each (B, max_channels)
 
+            if return_compact:
+                compact_modulations[layer_id] = (gamma_max, beta_max)
+
             # Adaptive pooling to target channel size
             beta = F.adaptive_avg_pool1d(beta_max, n_channels)  # (B, n_channels)
             gamma = F.adaptive_avg_pool1d(gamma_max, n_channels)  # (B, n_channels)
@@ -497,6 +504,9 @@ class SharedAttnModulator(nn.Module):
             projected_shapes = torch.Tensor([])
         else:
             projected_shapes = torch.stack(projected_shapes)
+
+        if return_compact:
+            return modulations, projected_shapes.to(original_img.device), compact_modulations
 
         return modulations, projected_shapes.to(original_img.device)
 

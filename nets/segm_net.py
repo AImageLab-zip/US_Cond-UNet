@@ -3,8 +3,69 @@ import torch.nn.functional as F
 import torch
 import numpy as np
 import wandb
+from peft import LoraConfig, get_peft_model
 from torchvision.transforms import v2
 from nets.unet_base import BaseUnet
+
+
+class SplitQKVLinear(nn.Module):
+    def __init__(self, base_layer: nn.Linear):
+        super().__init__()
+        if base_layer.out_features % 3 != 0:
+            raise ValueError("Expected fused qkv projection with out_features divisible by 3.")
+
+        self.proj_dim = base_layer.out_features // 3
+        self.q_proj = nn.Linear(base_layer.in_features, self.proj_dim, bias=base_layer.bias is not None)
+        self.k_proj = nn.Linear(base_layer.in_features, self.proj_dim, bias=base_layer.bias is not None)
+        self.v_proj = nn.Linear(base_layer.in_features, self.proj_dim, bias=base_layer.bias is not None)
+
+        with torch.no_grad():
+            self.q_proj.weight.copy_(base_layer.weight[: self.proj_dim])
+            self.k_proj.weight.copy_(base_layer.weight[self.proj_dim : 2 * self.proj_dim])
+            self.v_proj.weight.copy_(base_layer.weight[2 * self.proj_dim :])
+
+            if base_layer.bias is not None:
+                self.q_proj.bias.copy_(base_layer.bias[: self.proj_dim])
+                self.k_proj.bias.copy_(base_layer.bias[self.proj_dim : 2 * self.proj_dim])
+                self.v_proj.bias.copy_(base_layer.bias[2 * self.proj_dim :])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        return torch.cat((q, k, v), dim=-1)
+
+
+def replace_qkv_with_split_projections(module: nn.Module):
+    replaced_layers = 0
+    for child_name, child_module in list(module.named_children()):
+        if (
+            child_name == "qkv"
+            and isinstance(child_module, nn.Linear)
+            and child_module.out_features == child_module.in_features * 3
+        ):
+            setattr(module, child_name, SplitQKVLinear(child_module))
+            replaced_layers += 1
+            continue
+
+        replaced_layers += replace_qkv_with_split_projections(child_module)
+
+    return replaced_layers
+
+
+def apply_lora_to_qv_projections(module: nn.Module, rank: int, alpha: float | None = None):
+    replaced_layers = replace_qkv_with_split_projections(module)
+    if replaced_layers == 0:
+        raise ValueError("No qkv projections found in MedSAM image encoder for LoRA injection.")
+
+    lora_config = LoraConfig(
+        r=rank,
+        lora_alpha=(alpha if alpha is not None else rank),
+        target_modules=["q_proj", "v_proj"],
+        bias="none",
+    )
+    peft_module = get_peft_model(module, lora_config)
+    return peft_module, replaced_layers
 
 def pad_to_2d(x: torch.Tensor, stride: int):
     h, w = x.shape[-2:]
@@ -523,6 +584,7 @@ class MedSAM(nn.Module):
         prompt_encoder,
         freeze_image_encoder=True,
         predict_bboxes=False,
+        image_encoder_lora_rank=0,
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -535,6 +597,14 @@ class MedSAM(nn.Module):
         if self.freeze_image_encoder:
             for param in self.image_encoder.parameters():
                 param.requires_grad = False
+
+        self.image_encoder_lora_rank = int(image_encoder_lora_rank)
+        self.image_encoder_lora_layers = 0
+        if self.image_encoder_lora_rank > 0:
+            self.image_encoder, self.image_encoder_lora_layers = apply_lora_to_qv_projections(
+                self.image_encoder,
+                rank=self.image_encoder_lora_rank,
+            )
 
         # Classification head
         self.multi_cls = nn.Sequential(nn.Linear(256 * 64 * 64, 10))
@@ -672,7 +742,8 @@ class MedSAMPrompt(nn.Module):
         prompt_encoder,
         freeze_image_encoder=True,
         predict_bboxes=False,
-        n_organs = 1
+        n_organs = 1,
+        image_encoder_lora_rank=0,
     ):
         super().__init__()
         self.image_encoder = image_encoder
@@ -685,6 +756,14 @@ class MedSAMPrompt(nn.Module):
         if self.freeze_image_encoder:
             for param in self.image_encoder.parameters():
                 param.requires_grad = False
+
+        self.image_encoder_lora_rank = int(image_encoder_lora_rank)
+        self.image_encoder_lora_layers = 0
+        if self.image_encoder_lora_rank > 0:
+            self.image_encoder, self.image_encoder_lora_layers = apply_lora_to_qv_projections(
+                self.image_encoder,
+                rank=self.image_encoder_lora_rank,
+            )
 
         # Classification head
         self.multi_cls = nn.Sequential(nn.Linear(256 * 64 * 64, 10))

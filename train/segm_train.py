@@ -322,7 +322,8 @@ def train(args: Namespace):
             mask_decoder=deepcopy(sam_model.mask_decoder),
             prompt_encoder=deepcopy(sam_model.prompt_encoder),
             predict_bboxes=True,
-            freeze_image_encoder=0,
+            freeze_image_encoder=1,
+            image_encoder_lora_rank=4,
         )
         model.cuda()
 
@@ -336,8 +337,9 @@ def train(args: Namespace):
             mask_decoder=deepcopy(sam_model.mask_decoder),
             prompt_encoder=deepcopy(sam_model.prompt_encoder),
             predict_bboxes=True,
-            freeze_image_encoder=0,
+            freeze_image_encoder=1,
             n_organs=len(organ_to_class_dict),
+            image_encoder_lora_rank=4,
         )
         model.cuda()
 
@@ -425,6 +427,8 @@ def train(args: Namespace):
         optim=args.optim,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
         lr_scheduler_type=args.lr_scheduler_type,
         warmup_ratio=args.warmup_ratio,
         max_grad_norm=1.0,
