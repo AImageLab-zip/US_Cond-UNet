@@ -14,7 +14,6 @@ import numpy as np
 from utils.utils import (
     get_sft_transforms,
     class_to_organ_dict,
-    compute_nsd,
     mask_overlap_visualization,
 )
 from utils.stratified_splits import build_train_val_datasets
@@ -24,19 +23,9 @@ from pathlib import Path
 from accelerate import Accelerator
 from utils.sampler import BalancedHierarchicalSampler
 from transformers import TrainerCallback
-
-
-def _to_tensor_on_device(arr, device):
-    """Convert numpy array to torch tensor on `device` preserving dtype."""
-    if isinstance(arr, torch.Tensor):
-        return arr.to(device)
-    return torch.as_tensor(arr, device=device)
-
 def make_compute_metrics(accelerator=None):
     """
     Returns a compute_metrics(eval_pred) function suitable for HF Trainer.
-    If `accelerator` is provided (an accelerate.Accelerator instance), predictions
-    will be gathered from all processes before metric computation.
     """
     def compute_metrics(eval_pred):
         # Unpack eval_pred exactly like your original function expects
@@ -50,49 +39,17 @@ def make_compute_metrics(accelerator=None):
         else:
             raise ValueError("Unexpected eval_pred contents; expected (logits, masks, organ_ids, organ_id_metric).")
 
-        # If using accelerator, gather tensors from all processes
-        if accelerator is not None:
-            device = accelerator.device
-            # convert to tensors on device
-            logits_t = _to_tensor_on_device(logits_np, device)
-            masks_t = _to_tensor_on_device(masks_np, device)
-            organ_ids_t = _to_tensor_on_device(organ_ids_np, device)
-            organ_id_metric_t = _to_tensor_on_device(organ_id_metric_np, device)
-
-            # Use gather_for_metrics if available, else gather
-            gather_fn = getattr(accelerator, "gather_for_metrics", None) or getattr(accelerator, "gather", accelerator.gather)
-
-            # gather will block until all ranks reach here
-            try:
-                logits_all = gather_fn(logits_t)
-                masks_all = gather_fn(masks_t)
-                organ_ids_all = gather_fn(organ_ids_t)
-                organ_id_metric_all = gather_fn(organ_id_metric_t)
-            except Exception:
-                # fallback to plain gather
-                logits_all = accelerator.gather(logits_t)
-                masks_all = accelerator.gather(masks_t)
-                organ_ids_all = accelerator.gather(organ_ids_t)
-                organ_id_metric_all = accelerator.gather(organ_id_metric_t)
-
-            # move to cpu numpy for the heavy numpy logic that follows
-            logits = logits_all.detach().cpu().numpy()
-            masks = masks_all.detach().cpu().numpy()
-            organ_ids = organ_ids_all.detach().cpu().numpy()
-            organ_id_metric = organ_id_metric_all.detach().cpu().numpy()
-        else:
-            # single-process (or Trainer already gathered): keep numpy arrays
-            logits = np.asarray(logits_np)
-            masks = np.asarray(masks_np)
-            organ_ids = np.asarray(organ_ids_np)
-            organ_id_metric = np.asarray(organ_id_metric_np)
+        # Trainer already provides the prediction payload expected here.
+        logits = np.asarray(logits_np)
+        masks = np.asarray(masks_np)
+        organ_ids = np.asarray(organ_ids_np)
+        organ_id_metric = np.asarray(organ_id_metric_np)
 
         # --- now the original metric logic, slightly adapted ---
         batch_size = logits.shape[0]
         chunk_size = min(32, batch_size)
 
         dsc_scores_list = []
-        nsd_scores_list = []
         overlays = []
 
         random.seed(42)
@@ -147,26 +104,14 @@ def make_compute_metrics(accelerator=None):
             dsc_chunk = torch.nan_to_num(dsc_chunk, nan=0.0).cpu().numpy()
             dsc_scores_list.append(dsc_chunk)
 
-            # NSD - compute per-sample
-            pred_np_chunk = pred_idx_chunk.cpu().numpy()
-            gt_np_chunk = gt_idx_chunk.cpu().numpy()
-
-            nsd_chunk = np.array(
-                [compute_nsd(gt_np_chunk[i], pred_np_chunk[i], tolerance=1)
-                 for i in range(pred_np_chunk.shape[0])],
-                dtype=np.float32,
-            )
-            nsd_scores_list.append(nsd_chunk)
-
             # Clear memory
             del logits_chunk, masks_chunk, logits_resized, masks_resized
-            del pred_th_chunk, pred_idx_chunk, gt_idx_chunk, pred_np_chunk, gt_np_chunk
+            del pred_th_chunk, pred_idx_chunk, gt_idx_chunk
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         # Concatenate results
         dsc_scores = np.concatenate(dsc_scores_list) if dsc_scores_list else np.array([], dtype=np.float32)
-        nsd_scores = np.concatenate(nsd_scores_list) if nsd_scores_list else np.array([], dtype=np.float32)
 
         # Compute per-organ metrics
         organ_ids_arr = np.asarray(organ_id_metric)  # your code used organ_id_metric for per-sample organ
@@ -180,13 +125,10 @@ def make_compute_metrics(accelerator=None):
             # guard empty selection
             if organ_mask.sum() == 0:
                 dsc_mean = float(0.0)
-                nsd_mean = float(0.0)
             else:
                 dsc_mean = float(dsc_scores[organ_mask].mean())
-                nsd_mean = float(nsd_scores[organ_mask].mean())
 
             wandb_metrics[f"dsc_{organ_name}"] = dsc_mean
-            wandb_metrics[f"nsd_{organ_name}"] = nsd_mean
 
             if "unknown" not in organ_name.lower():
                 dsc_values_for_mean.append(dsc_mean)
