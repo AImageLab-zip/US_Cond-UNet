@@ -1,4 +1,3 @@
-from nnunet.network_architecture.generic_UNet import Generic_UNet
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
@@ -852,57 +851,5 @@ class MedSAMPrompt(nn.Module):
         }
 
 
-
-class nnUnetWrapper(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.nnunet = Generic_UNet(
-            input_channels=3,
-            base_num_features=48,
-            num_classes=1,
-            num_pool=5,
-            num_conv_per_stage=2,
-            feat_map_mul_on_downscale=2,
-            conv_op=nn.Conv2d,
-            norm_op=nn.InstanceNorm2d,
-            norm_op_kwargs={"eps": 1e-5, "affine": True},
-            dropout_op=nn.Dropout2d,
-            dropout_op_kwargs={"p": 0.0, "inplace": True},
-            nonlin=nn.LeakyReLU,
-            nonlin_kwargs={"negative_slope": 1e-2, "inplace": True},
-            deep_supervision=False,
-            dropout_in_localization=False,
-            final_nonlin=nn.Identity(),
-            convolutional_pooling=True,
-            convolutional_upsampling=True,
-            max_num_features=1024,
-        )
-        self.criterion = DiceBCELoss()
-
-    def forward(
-        self,
-        pixel_values,
-        organ_id=None,
-        labels=None,
-        masks=None,
-        bbox_coords=None,
-        organ_id_metric=None,
-        teacher_embedding=None,
-        teacher_mask=None,
-        pixel_values_medsam=None,
-    ):
-        out = self.nnunet(pixel_values).squeeze(1)
-        if masks is not None:
-            loss = self.criterion(out, masks)
-        else:
-            loss = 0.0
-
-        return {
-            "loss": loss,
-            "logits": out,
-            "labels": masks,
-            "organ_id": organ_id,
-            "organ_id_metric": organ_id_metric,
-        }
 
 # config = {"in_channels": 3,"num_classes": 1,"n_organs": 8,"size": 32,"depth": 5,"film_start": 0,"use_film": 1}
