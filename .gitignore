@@ -211,3 +211,4 @@ checkpoints/
 logs/
 .tmp
 AGENTS.md
+modulation*

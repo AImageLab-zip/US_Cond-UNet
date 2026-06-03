@@ -179,6 +179,37 @@ def train(args: Namespace):
             skip_dataset=args.val_skip_dataset,
             id_dropout=0.0,
         )
+        from data_classes.datasets import defaultdict
+        import random
+        import copy
+
+        label_to_indices = defaultdict(list)
+        for idx, item in enumerate(test_dataset.items):
+            if item['organ_label'] == 'testicle': continue
+            if item['organ_label'] == 'breast': item['organ_label'] = 'breast_luminal'
+            label_to_indices[item['organ_label']].append(idx)
+
+        unique_labels = list(label_to_indices.keys())
+        num_classes = len(unique_labels)
+        N = int(len([i for i in test_dataset.items if i['organ_label'] != 'testicle']) * 0.1)
+        samples_per_label = N // num_classes
+
+
+        sampled_indices = []
+
+        for label in unique_labels:
+            sampled_indices.extend(random.sample(label_to_indices[label], k=samples_per_label))
+
+        val_dataset = copy.deepcopy(test_dataset)
+        val_dataset.items = []
+
+        for idx in sampled_indices:
+            val_dataset.items.append(test_dataset[idx])
+
+        for i, item in enumerate(test_dataset.items[:]):
+            if i in sampled_indices:
+                test_dataset.items.remove(item)
+
     else:
         if int(getattr(args, "fold", 0)) > 0:
             train_dataset, val_dataset = build_train_val_datasets(

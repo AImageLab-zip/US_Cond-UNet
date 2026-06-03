@@ -398,7 +398,7 @@ class SharedAttnModulator(nn.Module):
         Compute gamma and beta for all layers at once.
 
         Args:
-            original_img: (B, 3, 256, 256) - original input image
+            original_img: (B, 3, H, W) - original input image
             organ_id: (B,) - organ type IDs (if >= 0, use organ embedding)
             layer_configs: list of (layer_id, n_channels) tuples
 
@@ -406,81 +406,91 @@ class SharedAttnModulator(nn.Module):
             dict: {layer_id: (gamma, beta)} where gamma/beta are (B, C, 1, 1)
             If return_compact=True, also returns raw (gamma_max, beta_max) per layer
             before channel pooling, each shaped (B, max_channels).
+
+        Performance note: all L layer queries are stacked into a single attention
+        call (B, L*n_q, D) so the (B, N, D) key/value projections are computed
+        only once instead of L times. For N=4096, D=768, L=22 this is ~20x faster.
         """
         B = original_img.shape[0]
+        L = len(layer_configs)
+        D = self.emb_dim
+        device = original_img.device
 
-        # Get patch embeddings from original image (shared across all layers)
+        # Patch embedding — shared across all layers, computed once.
         patches = self.patch_embed(original_img)  # (B, N, D)
 
+        # Organ query base — same for all layers, select by organ_id validity.
+        mask = organ_id >= 0  # (B,)
+        unk_idx = torch.tensor(
+            [self.organ_embed.weight.shape[0] - 1], device=device
+        ).expand(B)
+        q_org_base = torch.where(
+            mask[:, None],
+            self.organ_embed(organ_id.clamp(min=0)),
+            self.organ_embed(unk_idx),
+        )  # (B, D)
+
+        # All layer embeddings at once.
+        all_layer_ids = torch.tensor(
+            [lid for lid, _ in layer_configs], device=device
+        )  # (L,)
+        all_layer_embs = self.layer_embed(all_layer_ids)  # (L, D)
+
+        # Per-layer organ query: q_org_base + layer_emb  →  (B, L, D)
+        q_per_layer = q_org_base.unsqueeze(1) + all_layer_embs.unsqueeze(0)
+
+        # Influence token tiled to (B, L, D).
+        influence_all = self.influence_token.expand(B, L, -1)  # (B, L, D)
+
+        if self.use_shape:
+            unk_shape_idx = torch.tensor(
+                [self.shape_embed.weight.shape[0] - 1], device=device
+            ).expand(B)
+            q_shape = torch.where(
+                mask[:, None],
+                self.shape_embed(organ_id.clamp(min=0)),
+                self.shape_embed(unk_shape_idx),
+            )  # (B, D) — keep un-detached for shape_proj gradient
+
+            # projected_shape is identical for every layer (depends only on organ).
+            flattened_shape = self.shape_proj(q_shape)  # (B, shape_res²)
+            projected_shape = flattened_shape.reshape(B, self.shape_res, self.shape_res)
+            projected_shapes = torch.stack([projected_shape] * L)  # (L, B, sr, sr)
+
+            # Detach for use as attention query to isolate gradient path.
+            q_shape_attn = q_shape.detach().unsqueeze(1).expand(-1, L, -1)  # (B, L, D)
+
+            # Stack: [influence, organ+layer, shape]  →  (B, L, 3, D)
+            queries_all = torch.stack(
+                [influence_all, q_per_layer, q_shape_attn], dim=2
+            )
+            n_q = 3
+        else:
+            projected_shapes = torch.Tensor([])
+            # Stack: [influence, organ+layer]  →  (B, L, 2, D)
+            queries_all = torch.stack([influence_all, q_per_layer], dim=2)
+            n_q = 2
+
+        # Single attention call: K/V projections on (B, N, D) happen only once
+        # instead of L times — the dominant cost for large N.
+        queries_flat = queries_all.reshape(B, L * n_q, D)  # (B, L*n_q, D)
+        attn_out_flat, _ = self.attn(
+            query=queries_flat,  # (B, L*n_q, D)
+            key=patches,         # (B, N, D)
+            value=patches,
+        )  # → (B, L*n_q, D)
+
+        # Mean-pool each layer's n_q tokens  →  (B, L, D)
+        attn_out_all = attn_out_flat.reshape(B, L, n_q, D).mean(dim=2)
+
+        # Per-layer post-processing (cheap: norm + linear + gelu + dropout + output).
         modulations = {}
         compact_modulations = {} if return_compact else None
-        projected_shapes = []
-        for layer_id, n_channels in layer_configs:
-            # Get layer embedding
-            layer_emb = self.layer_embed(
-                torch.tensor([layer_id], device=original_img.device)
-            )  # (1, D)
-            layer_emb = layer_emb.expand(B, -1)  # (B, D)
+        for li, (layer_id, n_channels) in enumerate(layer_configs):
+            attn_out = attn_out_all[:, li, :]  # (B, D)
 
-            # Determine query based on organ_id validity
-            mask = organ_id >= 0  # [B]
-            q_org = self.organ_embed(
-                organ_id.clamp(min=0)
-            )  # [B, D] (dummy for unknown)
-            q_img = self.organ_embed(
-                torch.tensor(
-                    [self.organ_embed.weight.shape[0] - 1], device=original_img.device
-                ).expand(B)
-            )
-            q = torch.where(mask[:, None], q_org, q_img) + layer_emb  # [B, D]
-            queries_organ = q[:, None, :]  # [B, 1, D] for attention
-
-            influence_tokens = self.influence_token.expand(B, -1, -1)  # (B, 1, D)
-
-            if self.use_shape:
-                q_org = self.shape_embed(
-                    organ_id.clamp(min=0)
-                )  # [B, D] (dummy for unknown)
-                q_img = self.shape_embed(
-                    torch.tensor(
-                        [self.shape_embed.weight.shape[0] - 1],
-                        device=original_img.device,
-                    ).expand(B)
-                )
-                q = torch.where(mask[:, None], q_org, q_img)  # [B, D]
-                queries_shape = q[:, None, :]  # [B, 1, D] for attention
-                queries_shape_detached = queries_shape.detach()
-                flattened_shape = self.shape_proj(
-                    queries_shape[:, 0, :]
-                )  # Use non-detached for shape loss
-                projected_shape = flattened_shape.reshape(
-                    B, self.shape_res, self.shape_res
-                )
-                projected_shapes.append(projected_shape)
-
-                # Prepend influence token
-                queries = torch.cat(
-                    [influence_tokens, queries_organ, queries_shape_detached], dim=1
-                )  # (B, 3, D)
-
-            else:
-                queries = torch.cat(
-                    [influence_tokens, queries_organ], dim=1
-                )  # (B, 3, D)
-
-            # Attention
-            attn_out, _ = self.attn(
-                query=queries,  # (B, 3, D)
-                key=patches,  # (B, N, D)
-                value=patches,  # (B, N, D)
-            )
-
-            # Average over query tokens
-            attn_out = attn_out.mean(dim=1)  # (B, D)
-
-            # Generate gamma and beta using layer-specific linear
             x = self.shared_norm(attn_out)
-            x = self.layer_linears[layer_id](x)  # Layer-specific transformation
+            x = self.layer_linears[layer_id](x)
             x = self.shared_gelu(x)
             x = self.shared_dropout(x)
             gamma_beta = self.shared_output(x)  # (B, 2 * max_channels)
@@ -488,27 +498,16 @@ class SharedAttnModulator(nn.Module):
             beta_max, gamma_max = gamma_beta.chunk(2, dim=-1)  # each (B, max_channels)
 
             if return_compact:
-                compact_modulations[layer_id] = (gamma_max, beta_max)
+                compact_modulations[layer_id] = (gamma_max, beta_max, attn_out)
 
-            # Adaptive pooling to target channel size
-            beta = F.adaptive_avg_pool1d(beta_max, n_channels)  # (B, n_channels)
-            gamma = F.adaptive_avg_pool1d(gamma_max, n_channels)  # (B, n_channels)
-
-            # Reshape for broadcasting with (B, C, H, W)
-            beta = beta.unsqueeze(-1).unsqueeze(-1)  # (B, n_channels, 1, 1)
-            gamma = gamma.unsqueeze(-1).unsqueeze(-1)  # (B, n_channels, 1, 1)
+            beta = F.adaptive_avg_pool1d(beta_max, n_channels).unsqueeze(-1).unsqueeze(-1)
+            gamma = F.adaptive_avg_pool1d(gamma_max, n_channels).unsqueeze(-1).unsqueeze(-1)
 
             modulations[layer_id] = (gamma, beta)
 
-        if projected_shapes == []:
-            projected_shapes = torch.Tensor([])
-        else:
-            projected_shapes = torch.stack(projected_shapes)
-
         if return_compact:
-            return modulations, projected_shapes.to(original_img.device), compact_modulations
-
-        return modulations, projected_shapes.to(original_img.device)
+            return modulations, projected_shapes.to(device), compact_modulations
+        return modulations, projected_shapes.to(device)
 
 
 class DownConvBlockFiLM(nn.Module):

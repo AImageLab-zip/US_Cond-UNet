@@ -213,23 +213,96 @@ class FiLM2d(nn.Module):
         nn.init.constant_(self.mlp[-1].bias[:in_channels], 0)  # β
         nn.init.constant_(self.mlp[-1].bias[in_channels:], 1)  # γ
 
-    def forward(self, x: torch.Tensor, organ_id: torch.Tensor):
-        """
-        x : (B, C, H, W)
-        organ_id : (B,) integer 0…n_organs-1
-        """
-        B = x.shape[0]
+    def compute_modulation(self, organ_id: torch.Tensor):
+        """Return FiLM coefficients and conditioning embedding for a batch."""
+        B = organ_id.shape[0]
+        device = organ_id.device
         mask = organ_id >= 0  # [B]
         q_org = self.embed(organ_id.clamp(min=0))  # [B, D] (dummy for unknown)
         q_img = self.embed(
-            torch.tensor([self.embed.weight.shape[0] - 1], device=x.device).expand(B)
+            torch.tensor([self.embed.weight.shape[0] - 1], device=device).expand(B)
         )
         q = torch.where(mask[:, None], q_org, q_img)
         beta_gamma = self.mlp(q)  # (B, 2C)
         beta, gamma = beta_gamma.chunk(2, dim=-1)  # each (B, C)
         beta = beta.unsqueeze(-1).unsqueeze(-1)
         gamma = gamma.unsqueeze(-1).unsqueeze(-1)
+        return gamma, beta, q
+
+    def forward(self, x: torch.Tensor, organ_id: torch.Tensor):
+        """
+        x : (B, C, H, W)
+        organ_id : (B,) integer 0…n_organs-1
+        """
+        gamma, beta, _ = self.compute_modulation(organ_id)
         return gamma * x + beta
+
+
+class SharedFiLMModulator:
+    """
+    Compatibility helper that exposes the same collection interface used by
+    UNet2DAttn notebooks: compute all per-layer FiLM coefficients in one call.
+    """
+
+    def __init__(self, model: "UNet2DFiLM"):
+        self.model = model
+
+    def compute_all_modulations(
+        self,
+        original_img: torch.Tensor,
+        organ_id: torch.Tensor,
+        layer_configs: list[tuple[int, int]],
+        return_compact: bool = False,
+    ):
+        del original_img  # FiLM modulation depends only on organ_id in this model.
+
+        modulations = {}
+        compact_modulations = {} if return_compact else None
+        film_layers = self.model._get_film_layers_in_order()
+
+        if len(film_layers) != len(layer_configs):
+            raise RuntimeError(
+                f"FiLM layer/config mismatch: {len(film_layers)} layers vs "
+                f"{len(layer_configs)} configs."
+            )
+
+        for (layer_id, n_channels), film_layer in zip(layer_configs, film_layers):
+            gamma, beta, film_context = film_layer.compute_modulation(organ_id)
+            modulations[layer_id] = (gamma, beta)
+
+            if not return_compact:
+                continue
+
+            gamma_flat = gamma.squeeze(-1).squeeze(-1)
+            beta_flat = beta.squeeze(-1).squeeze(-1)
+
+            if n_channels != self.model.max_channels:
+                gamma_compact = F.interpolate(
+                    gamma_flat.unsqueeze(1),
+                    size=self.model.max_channels,
+                    mode="linear",
+                    align_corners=False,
+                ).squeeze(1)
+                beta_compact = F.interpolate(
+                    beta_flat.unsqueeze(1),
+                    size=self.model.max_channels,
+                    mode="linear",
+                    align_corners=False,
+                ).squeeze(1)
+            else:
+                gamma_compact = gamma_flat
+                beta_compact = beta_flat
+
+            compact_modulations[layer_id] = (
+                gamma_compact,
+                beta_compact,
+                film_context,
+            )
+
+        projected_shapes = torch.empty(0, device=organ_id.device)
+        if return_compact:
+            return modulations, projected_shapes, compact_modulations
+        return modulations, projected_shapes
 
 
 class DownConvBlockFiLM(nn.Module):
@@ -398,8 +471,12 @@ class UNet2DFiLM(BaseUnet):
 
         self.film_start = max(0, int(film_start))
         self.use_film = bool(use_film)
+        self.use_attn = self.use_film
+        self.attn_start = self.film_start
         self.film_embed = int(film_embed)
+        self.max_channels = self.size * (2 ** (self.depth + 1))
         self.criterion = DiceBCELoss()
+        self.shared_attn = SharedFiLMModulator(self) if self.use_film else None
 
         # ---------------- Encoder ----------------
         self.encoder = nn.ModuleDict()
@@ -498,6 +575,52 @@ class UNet2DFiLM(BaseUnet):
             unet_teacher_ckpt=unet_teacher_ckpt,
             unet_teacher_kwargs=unet_teacher_kwargs,
         )
+
+    def _build_layer_configs(self):
+        """Match UNet2DAttn layer ordering for notebook-side FiLM collection."""
+        configs = []
+        layer_id = 0
+
+        for i in range(self.depth):
+            if self.use_film and i >= self.film_start:
+                configs.append((layer_id, self.size * (2**i)))
+                layer_id += 1
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+
+        if self.use_film:
+            configs.append((layer_id, self.size * (2**self.depth)))
+            layer_id += 1
+            configs.append((layer_id, self.size * (2 ** (self.depth + 1))))
+            layer_id += 1
+
+        for i in range(self.depth - 1, -1, -1):
+            if self.use_film and i >= self.film_start:
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+                configs.append((layer_id, self.size * (2 ** (i + 1))))
+                layer_id += 1
+
+        return configs
+
+    def _get_film_layers_in_order(self):
+        """Return FiLM modules in the same order as `_build_layer_configs`."""
+        film_layers = []
+
+        for i in range(self.depth):
+            layer = self.encoder[str(i)]
+            if isinstance(layer, DownConvBlockFiLM):
+                film_layers.extend(layer.film_blocks)
+
+        if isinstance(self.bottleneck, UpConvBlockFiLM):
+            film_layers.extend(self.bottleneck.film_blocks)
+
+        for i in range(self.depth - 1, -1, -1):
+            layer = self.decoder[str(i)]
+            if isinstance(layer, UpConvBlockFiLM):
+                film_layers.extend(layer.film_blocks)
+
+        return film_layers
 
     def _encode(
         self,
