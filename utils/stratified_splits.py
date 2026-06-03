@@ -75,7 +75,10 @@ def build_train_val_datasets(
         id_dropout=args.id_dropout,
         self_norm=args.self_norm,
     )
-
+    print(
+        f"[split] Total: {len(train_full)}"
+    )
+    # return train_full
     fold = int(getattr(args, "fold", 0))
     tr_idx, va_idx = stratified_80_20_indices(train_full, seed=seed)
 

@@ -1,6 +1,6 @@
-# US-FiLMUNet: Cross-Domain Ultrasound Segmentation
+# Cond-UNet: Cross-Domain Ultrasound Segmentation
 
-This repository contains the official PyTorch implementation for the paper: "TOO BIG TO FAIL? NOT QUITE: FILM-UNET BEATS FOUNDATION MODELS IN CROSS-DOMAIN ULTRASOUND SEGMENTATION", submitted, and under review, to the MICCAI 2026 Conference.
+This repository contains the official PyTorch implementation for the paper: "A New Multicenter Testicular US Dataset and a Lightweight Cond-UNet for Generalization in US Segmentation", submitted, and under review, to the BMVC 2026 Conference.
 
 Here you will find the code to run our model in inference and to fine-tune it on your own ultrasound image dataset.
 
@@ -8,14 +8,14 @@ Here you will find the code to run our model in inference and to fine-tune it on
   <img src="film_unet.png" alt="IM-Fuse overview" width="">
   <br>
   <em>
-    Overview of the proposed FiLM-UNet architecture.
+    Overview of the proposed Cond-UNet architecture.
   </em>
 </p>
 
 
 ## Dataset
 
-**TesticulUS** is a multi-institutional ultrasound segmentation dataset composed of **1,054 images** collected from **two clinical centers**, capturing variability in acquisition protocols and devices to support cross-domain evaluation.
+Our work introduce a new multi-institutional ultrasound segmentation dataset composed of **1,054 images** collected from **two clinical centers**, capturing variability in acquisition protocols and devices to support cross-domain evaluation.
 
 Each image is paired with a **pixel-wise expert-annotated segmentation mask**. The dataset is designed for:
 
@@ -29,6 +29,7 @@ Each image is paired with a **pixel-wise expert-annotated segmentation mask**. T
 - Modality: Ultrasound  
 - Annotations: Expert pixel-wise masks  
 
+Dataset available [here](https://drive.google.com/drive/folders/1a2dvr4E0Z9ED1uKPdAZiWAYdCdF1aIyl)
 
 ## Inference with our Pre-trained Model
 
