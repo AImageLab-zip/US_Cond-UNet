@@ -64,19 +64,6 @@ dataset_to_organ_dict = {
     "private_Testicle": "testicle",
     "public_Testicle_syn": "testicle",
 }
-dataset_for_classification = [
-    "Appendix",
-    "BUS-BRA",
-    "BUSI",
-    "BUSI",
-    "BUID",
-    "Fatty-Liver",
-    "private_Appendix",
-    "private_Breast",
-    # "private_Breast_luminal",
-    "private_Liver",
-    "private_Testicle",
-]
 dataset_for_segmentation = [
     "BUS-BRA",
     "BUSI",
@@ -99,34 +86,6 @@ dataset_for_segmentation = [
     "public_Testicle_syn",
     
 ]
-
-multi_cls_labels_dict = {
-    "private_Breast_luminal": [0, 1, 2, 3],
-    "private Breast luminal": [0, 1, 2, 3],
-    "Breast_luminal": [0, 1, 2, 3],
-    "breast_luminal": [0, 1, 2, 3],
-    "Breast luminal": [0, 1, 2, 3],
-    "BUS-BRA": [4, 5],
-    "BUSI": [4, 5],
-    "Fatty-Liver": [6, 7],
-    "Liver": [6, 7],
-    "liver": [6, 7],
-    "private_Liver": [6, 7],
-    "private Liver": [6, 7],
-    "private_Breast": [4, 5],
-    "BUID": [4, 5],
-    "private Breast": [4, 5],
-    "private_Appendix": [8, 9],
-    "private Appendix": [8, 9],
-    "Appendix": [8, 9],
-    "appendix": [8, 9],
-    "Breast": [4, 5],
-    "breast": [4, 5],
-    "private_Testicle": [10, 11],
-    "testicle": [10, 11],
-}
-
-
 
 def resize_pad(
     img: torch.Tensor,

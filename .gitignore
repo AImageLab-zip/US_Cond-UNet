@@ -212,3 +212,12 @@ logs/
 .tmp
 AGENTS.md
 modulation*
+figures/
+utils/paths.py
+
+# Model artifacts are distributed separately from the source repository.
+*.safetensors
+*.pth
+*.pt
+.claude
+.code-review-graph

@@ -1,0 +1,13 @@
+"""Copy this file to paths.py and configure paths for your local environment."""
+
+DATA_DIR = "/path/to/dataset"
+SYN_TESTICLE_DATASET_PATH = "/path/to/synthetic-testicle-dataset"
+MEDSAM_BASE_WEIGHTS = "/path/to/medsam_vit_b.pth"
+TESTICLE_DATSET_PATH = "/path/to/testicle-dataset"
+TESTICLE_ALLID_DATSET_PATH = "/path/to/testicle-all-id-dataset"
+FILMUNET4_CHECKPOINT = "/path/to/cond-unet-depth-4.safetensors"
+FILMUNET5_CHECKPOINT = "/path/to/cond-unet-depth-5.safetensors"
+UNET5_CHECKPOINT = "/path/to/unet-depth-5.safetensors"
+UUSIC_VAL_DATA = "/path/to/validation-data"
+MEDSAM_UNFREEZED_CHECKPOINT = "/path/to/medsam-unfrozen.safetensors"
+MEDSAM_PROMPT_CHECKPOINT = "/path/to/medsam-prompt.safetensors"

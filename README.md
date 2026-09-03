@@ -4,6 +4,8 @@ This repository contains the official PyTorch implementation for the paper: "A N
 
 Here you will find the code to run our model in inference and to fine-tune it on your own ultrasound image dataset.
 
+Before running the code, copy `utils/paths.example.py` to `utils/paths.py` and set the local dataset and checkpoint paths.
+
 <p align="center">
   <img src="film_unet.png" alt="IM-Fuse overview" width="">
   <br>

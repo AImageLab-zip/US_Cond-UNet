@@ -18,8 +18,8 @@ def parse_args():
     parser.add_argument(
         "--wandb-project",
         type=str,
-        default='uusic_segm',
-        help="Weights & Biases project name. If set, enables W&B logging.",
+        default=None,
+        help="Weights & Biases project name. Enables W&B logging when set.",
     )
     parser.add_argument(
         "--wandb-run-name", type=str, default=None, help="Weights & Biases run name."
@@ -31,13 +31,6 @@ def parse_args():
     # -----------------------------------------------
     # |               DATASET Config                |
     # -----------------------------------------------
-    parser.add_argument(
-        "--dataset-type",
-        type=str,
-        default="segmentation",
-        choices=["both", "segmentation", "classification"],
-        help="what data to load, available segmnetation and classification",
-    )
     parser.add_argument(
         "--dataset-size",
         type=int,
@@ -246,24 +239,6 @@ def parse_args():
         help="to use if want to train on public data and test on private",
     )
     parser.add_argument(
-        "--sft",
-        type=int,
-        default=0,
-        help="to use if want to finetune on any dataset of your choice",
-    )
-    parser.add_argument(
-        "--testicle-sft",
-        type=int,
-        default=0,
-        help="to use if want to finetune on testicle dataset",
-    )
-    parser.add_argument(
-        "--use-syn",
-        type=int,
-        default=0,
-        help="to use if want to finetune on synthetic testicle dataset",
-    )
-    parser.add_argument(
         "--resume",
         type=str,
         default=None,
@@ -306,10 +281,7 @@ if __name__ == "__main__":
     if args.wandb_project and not args.wandb_run_name:
         # Construct a descriptive run name from the most important swept args
         name_parts = [
-            f"RN{args.rn_size}",
-            f"CBAM{args.use_cbam}",
             f"FILM{args.use_film}",
-            f"BBOX{args.regr_bbox}",
             f"LR{args.learning_rate:.0e}",  # Format as scientific notation
             f"WR{args.warmup_ratio}",
             f"FB{args.freeze_backbone}",
@@ -324,11 +296,6 @@ if __name__ == "__main__":
         debugpy.wait_for_client()
         print(">>> Debugger attached. Resuming execution.")
 
-    if args.testicle_sft:
-        from train.testicle_finetuning import train
-    elif args.sft:
-        from train.finetuning import train
-    else:
-        from train.segm_train import train
+    from train.segm_train import train
         
     train(args)

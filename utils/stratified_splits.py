@@ -19,38 +19,20 @@ def set_all_seeds(seed: int = 42):
 
 
 def make_strata(dataset):
-    """
-    Returns:
-      strata: np.ndarray of shape (N,) with combined labels "organId|multiLabel"
-      organs: np.ndarray of shape (N,) with organ ids alone (for fallback)
-    """
+    """Return organ IDs for stratified segmentation splits."""
     organs = []
-    multi = []
     for it in dataset.items:  # use metadata; no image I/O
         organ_id = organ_to_class_dict[it["organ_label"]]
         organs.append(int(organ_id))
-        multi.append(int(it["multi_cls_label"]))  # may be -100 for 'not available'
-    organs = np.asarray(organs, dtype=int)
-    multi = np.asarray(multi, dtype=int)
-    strata = np.array([f"{o}|{m}" for o, m in zip(organs, multi)])
-    return strata, organs
+    return np.asarray(organs, dtype=int)
 
 
 def stratified_80_20_indices(dataset, seed: int = 42):
-    strata, organs = make_strata(dataset)
-
-    # First try: strict stratification on (organ_id, multi_cls_label)
+    strata = make_strata(dataset)
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=seed)
     idx = np.arange(len(dataset))
-    try:
-        train_idx, val_idx = next(sss.split(idx, strata))
-        return train_idx.tolist(), val_idx.tolist()
-    except ValueError as e:
-        # Common cause: at least one stratum has < 2 samples
-        print(f"[split] Falling back to organ-only stratification because: {e}")
-        sss2 = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=seed)
-        train_idx, val_idx = next(sss2.split(idx, organs))
-        return train_idx.tolist(), val_idx.tolist()
+    train_idx, val_idx = next(sss.split(idx, strata))
+    return train_idx.tolist(), val_idx.tolist()
 
 
 def build_train_val_datasets(
@@ -67,7 +49,6 @@ def build_train_val_datasets(
             if get_sft_transforms_ is None
             else get_sft_transforms_(train=True, size=int(args.dataset_size))
         ),
-        data_type=args.dataset_type,
         out_size=args.dataset_size,
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
@@ -90,7 +71,6 @@ def build_train_val_datasets(
     #     DATA_DIR,
     #     id_file_name,  # same source list, we'll index it with va_idx
     #     transforms=get_sft_transforms(train=False) if get_sft_transforms_ is None else get_sft_transforms_(train=False),
-    #     data_type=args.dataset_type,
     #     out_size=args.dataset_size,
     #     ccl_crop=args.use_ccl_crop,
     #     keep_aspect_ratio=args.keep_aspect_ratio,

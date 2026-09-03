@@ -10,9 +10,7 @@ from utils.utils import (
     extract_bbox_ultrasound_cv2,
     organ_to_class_dict,
     dataset_to_organ_dict,
-    dataset_for_classification,
     dataset_for_segmentation,
-    multi_cls_labels_dict,
     resize_pad,
 )
 from PIL import Image
@@ -35,7 +33,6 @@ class USdatasetOmni(Dataset):
         split,
         transforms=None,
         out_size=1024,
-        data_type="both",
         ccl_crop=False,
         keep_aspect_ratio=True,
         self_norm=False,
@@ -46,7 +43,6 @@ class USdatasetOmni(Dataset):
         self.sample_list = []
         self.aug = transforms
         self.out_size = out_size
-        self.data_type = data_type
         self.ccl_crop = ccl_crop
         self.keep_aspect_ratio = keep_aspect_ratio
         self.self_norm = self_norm
@@ -108,7 +104,6 @@ class USdatasetOmni(Dataset):
                     item["image_path"] = str(file_path)
                     item["mask_path"] = None
                     item["bbox_regr"] = [-100, -100, -100, -100]
-                    item["multi_cls_label"] = -100
                     item["organ_label"] = dataset_to_organ_dict[dataset_name]
 
                     if dataset_name in dataset_for_segmentation:
@@ -126,21 +121,7 @@ class USdatasetOmni(Dataset):
                             print(
                                 f"Warning: {file_path.parent.parent}/masks/{file_path.name} not found"
                             )
-                    if dataset_name in dataset_for_classification:
-                        item["multi_cls_label"] = multi_cls_labels_dict[dataset_name][
-                            int(file_path.parent.name)
-                        ]
-                    if self.data_type == "both":
-                        self.items.append(item)
-                    elif (
-                        self.data_type == "classification"
-                        and dataset_name in dataset_for_classification
-                    ):
-                        self.items.append(item)
-                    elif (
-                        self.data_type == "segmentation"
-                        and dataset_name in dataset_for_segmentation
-                    ):
+                    if dataset_name in dataset_for_segmentation:
                         self.items.append(item)
 
     def __len__(self):
@@ -233,7 +214,6 @@ class USdatasetOmni(Dataset):
             "pixel_values": image_normed.to(torch.float),
             "pixel_values_medsam": image_normed_medsam.to(torch.float),
             "organ_id": organ_id,
-            "labels": item["multi_cls_label"],
             "masks": mask.to(torch.float).squeeze(),
             "bbox_coords": unormalized_bbox_coords,
             "organ_id_metric": organ_id,

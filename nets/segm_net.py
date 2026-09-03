@@ -344,13 +344,27 @@ class DownConvBlockFiLM(nn.Module):
 
         self.pool = nn.MaxPool2d(2, 2)
 
-    def forward(self, x: torch.Tensor, organ_id: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        gammas: list[torch.Tensor] | None = None,
+        betas: list[torch.Tensor] | None = None,
+    ):
         """
         organ_id : (B,) torch.long   (0 = breast, 1 = thyroid, …)
         """
-        for conv, film in zip(self.conv_blocks, self.film_blocks):
+        if (gammas is None) != (betas is None):
+            raise ValueError("gammas and betas must be provided together.")
+
+        for idx, (conv, film) in enumerate(zip(self.conv_blocks, self.film_blocks)):
             x = conv(x)  # usual conv-norm-ReLU
-            x = film(x, organ_id)  # FiLM modulation
+            if gammas is None:
+                if organ_id is None:
+                    raise ValueError("organ_id is required when FiLM modulations are not precomputed.")
+                x = film(x, organ_id)  # FiLM modulation
+            else:
+                x = gammas[idx] * x + betas[idx]
         return self.pool(x), x  # (downsampled, skip-connection)
 
 
@@ -400,14 +414,28 @@ class UpConvBlockFiLM(nn.Module):
                 out_channels[-1], out_channels[-1], **upconv_kwargs
             )
 
-    def forward(self, x: torch.Tensor, organ_id: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        gammas: list[torch.Tensor] | None = None,
+        betas: list[torch.Tensor] | None = None,
+    ):
         """
         x : (B, C, H, W)
         organ_id : (B,) long tensor - 0=breast, 1=thyroid, …
         """
-        for conv, film in zip(self.conv_blocks, self.film_blocks):
+        if (gammas is None) != (betas is None):
+            raise ValueError("gammas and betas must be provided together.")
+
+        for idx, (conv, film) in enumerate(zip(self.conv_blocks, self.film_blocks)):
             x = conv(x)
-            x = film(x, organ_id)
+            if gammas is None:
+                if organ_id is None:
+                    raise ValueError("organ_id is required when FiLM modulations are not precomputed.")
+                x = film(x, organ_id)
+            else:
+                x = gammas[idx] * x + betas[idx]
 
         if self.up_conv:
             x = self.up_conv_op(x)
@@ -622,6 +650,42 @@ class UNet2DFiLM(BaseUnet):
 
         return film_layers
 
+    def _prepare_forward(
+        self,
+        *,
+        pixel_values: torch.Tensor,
+        organ_id: torch.Tensor | None = None,
+        **kwargs,
+    ) -> dict:
+        forward_ctx = {
+            "mod_list": None,
+            "mod_idx": 0,
+        }
+        if self.use_film:
+            if organ_id is None:
+                raise ValueError("organ_id is required when FiLM is enabled.")
+            layer_configs = self._build_layer_configs()
+            film_layers = self._get_film_layers_in_order()
+            if len(film_layers) != len(layer_configs):
+                raise RuntimeError(
+                    f"FiLM layer/config mismatch: {len(film_layers)} layers vs "
+                    f"{len(layer_configs)} configs."
+                )
+            modulations = {
+                layer_id: film_layer.compute_modulation(organ_id)[:2]
+                for (layer_id, _), film_layer in zip(layer_configs, film_layers)
+            }
+            forward_ctx["mod_list"] = [modulations[i] for i in range(len(layer_configs))]
+        return forward_ctx
+
+    def _next_modulation(self, forward_ctx: dict):
+        mod_idx = forward_ctx["mod_idx"]
+        mod_list = forward_ctx["mod_list"]
+        gammas = [mod_list[mod_idx][0], mod_list[mod_idx + 1][0]]
+        betas = [mod_list[mod_idx][1], mod_list[mod_idx + 1][1]]
+        forward_ctx["mod_idx"] = mod_idx + 2
+        return gammas, betas
+
     def _encode(
         self,
         layer,
@@ -630,7 +694,10 @@ class UNet2DFiLM(BaseUnet):
         forward_ctx=None,
     ):
         if isinstance(layer, DownConvBlockFiLM):
-            return layer(x, organ_id)
+            if forward_ctx is not None and forward_ctx.get("mod_list") is not None:
+                gammas, betas = self._next_modulation(forward_ctx)
+                return layer(x, gammas=gammas, betas=betas)
+            return layer(x, organ_id=organ_id)
         else:
             return layer(x)
 
@@ -642,7 +709,10 @@ class UNet2DFiLM(BaseUnet):
         forward_ctx=None,
     ):
         if isinstance(layer, UpConvBlockFiLM):
-            return layer(x, organ_id)
+            if forward_ctx is not None and forward_ctx.get("mod_list") is not None:
+                gammas, betas = self._next_modulation(forward_ctx)
+                return layer(x, gammas=gammas, betas=betas)
+            return layer(x, organ_id=organ_id)
         else:
             return layer(x)
 
@@ -653,7 +723,10 @@ class UNet2DFiLM(BaseUnet):
         forward_ctx=None,
     ):
         if isinstance(self.bottleneck, UpConvBlockFiLM):
-            return self.bottleneck(x, organ_id)
+            if forward_ctx is not None and forward_ctx.get("mod_list") is not None:
+                gammas, betas = self._next_modulation(forward_ctx)
+                return self.bottleneck(x, gammas=gammas, betas=betas)
+            return self.bottleneck(x, organ_id=organ_id)
         else:
             return self.bottleneck(x)
 

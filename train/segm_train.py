@@ -9,7 +9,7 @@ from torchmetrics.functional.segmentation import dice_score
 from nets.segm_net import UNet2DFiLM, MedSAM, MedSAMPrompt
 from nets.unet_attn import UNet2DAttn
 from utils.paths import DATA_DIR
-from utils.utils import organ_to_class_dict, multi_cls_labels_dict, generate_run_hash
+from utils.utils import organ_to_class_dict, generate_run_hash
 import numpy as np
 from utils.utils import (
     get_sft_transforms,
@@ -158,7 +158,6 @@ def train(args: Namespace):
         #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
         #     transforms=get_sft_transforms(train=True),
-        #     data_type=args.dataset_type,
         #     out_size=args.dataset_size,
         #     ccl_crop=args.use_ccl_crop,
         #     keep_aspect_ratio=args.keep_aspect_ratio,
@@ -171,7 +170,6 @@ def train(args: Namespace):
             DATA_DIR,
             "val_cls",
             transforms=get_sft_transforms(train=False, size =int(args.dataset_size)),
-            data_type=args.dataset_type,
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
@@ -220,7 +218,6 @@ def train(args: Namespace):
                 DATA_DIR,
                 "train",
                 transforms=get_sft_transforms(train=True, size =int(args.dataset_size)),
-                data_type=args.dataset_type,
                 out_size=args.dataset_size,
                 ccl_crop=args.use_ccl_crop,
                 keep_aspect_ratio=args.keep_aspect_ratio,
@@ -232,7 +229,6 @@ def train(args: Namespace):
         #     "/work/phd_ultrasounds/UUSIC_new/datasets/Synthetic_dataset_70_1.0_1.5_larger_filtered/pt_data",
         #     "train",
         #     transforms=get_sft_transforms(train=True),
-        #     data_type=args.dataset_type,
         #     out_size=args.dataset_size,
         #     ccl_crop=args.use_ccl_crop,
         #     keep_aspect_ratio=args.keep_aspect_ratio,
@@ -248,12 +244,10 @@ def train(args: Namespace):
                 DATA_DIR,
                 "val",
                 transforms=get_sft_transforms(train=False, size =int(args.dataset_size)),
-                data_type=args.dataset_type,
                 out_size=args.dataset_size,
                 ccl_crop=args.use_ccl_crop,
                 keep_aspect_ratio=args.keep_aspect_ratio,
                 self_norm=args.self_norm,
-                include_testicles=True,
                 id_dropout=0.0,
             )
         # train_dataset, val_dataset = build_train_val_datasets(
@@ -266,12 +260,10 @@ def train(args: Namespace):
             DATA_DIR,
             "test",
             transforms=get_sft_transforms(train=False, size =int(args.dataset_size) ),
-            data_type=args.dataset_type,
             out_size=args.dataset_size,
             ccl_crop=args.use_ccl_crop,
             keep_aspect_ratio=args.keep_aspect_ratio,
             self_norm=args.self_norm,
-            include_testicles=True,
             id_dropout=0.0,
         )
 
@@ -281,7 +273,7 @@ def train(args: Namespace):
     train_sampler = BalancedHierarchicalSampler(
         dataset=train_dataset,
         batch_size=args.batch_size,
-        steps_per_epoch=int(args.epochs / 50),
+        steps_per_epoch=max(1, int(args.epochs / 50)),
         seed=args.seed,
     )
 
@@ -362,7 +354,7 @@ def train(args: Namespace):
     print(f"Saving results to: {output_dir}")
     accelerator = Accelerator()
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and args.wandb_project:
         wandb.login()
         wandb.init(
             entity=args.wandb_entity,
@@ -375,6 +367,7 @@ def train(args: Namespace):
     # for steps
     training_args = TrainingArguments(
         output_dir=output_dir,
+        label_names=["masks"],
         # num_train_epochs=args.epochs,
         max_steps=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -383,12 +376,12 @@ def train(args: Namespace):
         seed=args.seed,
         save_strategy="steps",
         eval_strategy="steps",
-        save_steps=int(args.epochs / 50),
-        eval_steps=int(args.epochs / 50),
+        save_steps=max(1, int(args.epochs / 50)),
+        eval_steps=max(1, int(args.epochs / 50)),
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         save_total_limit=2,
-        report_to=["wandb"] if args.wandb_project else None,
+        report_to=["wandb"] if args.wandb_project else [],
         run_name=args.wandb_run_name,
         dataloader_num_workers=args.num_workers,
         dataloader_persistent_workers=True,

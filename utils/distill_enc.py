@@ -279,7 +279,6 @@ def main(args: Namespace):
         DATA_DIR,
         "val_cls",
         transforms=get_sft_transforms(train=False),
-        data_type=args.dataset_type,
         out_size=args.dataset_size,
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
@@ -363,7 +362,6 @@ def main(args: Namespace):
     print("\n" + "=" * 80)
     print("PHASE 2: Segmentation Training - Training Decoder + LoRA Encoder")
     print("=" * 80)
-    args.dataset_type = 'segmentation'
     print("Loading public for train, private for test!")
     train_dataset, val_dataset = build_train_val_datasets(
         DATA_DIR, args, seed=args.seed, id_file_name="train_cls"
@@ -373,7 +371,6 @@ def main(args: Namespace):
         DATA_DIR,
         "val_cls",
         transforms=get_sft_transforms(train=False),
-        data_type=args.dataset_type,
         out_size=args.dataset_size,
         ccl_crop=args.use_ccl_crop,
         keep_aspect_ratio=args.keep_aspect_ratio,
