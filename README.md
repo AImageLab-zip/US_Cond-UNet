@@ -1,6 +1,6 @@
 # Cond-UNet: Cross-Domain Ultrasound Segmentation
 
-This repository contains the official PyTorch implementation for the BMVC 2026 paper: "A New Multicenter Testicular US Dataset and a Lightweight Cond-UNet for Generalization in US Segmentation."
+This repository contains the official PyTorch implementation for the BMVC 2026 paper: [A New Multicenter Testicular US Dataset and a Lightweight Cond-UNet for Generalization in US Segmentation](https://federicobolelli.it/media/publications/pdfs/0475.pdf).
 
 Here you will find the code to run our model in inference and to fine-tune it on your own ultrasound image dataset.
 
