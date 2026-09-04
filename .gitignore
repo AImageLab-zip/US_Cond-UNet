@@ -221,3 +221,9 @@ utils/paths.py
 *.pt
 .claude
 .code-review-graph
+
+# Local staging area for Hugging Face Hub releases.
+huggingface_release/
+huggingface_release_dataset/
+huggingface_release_dataset/
+*/tmp*
