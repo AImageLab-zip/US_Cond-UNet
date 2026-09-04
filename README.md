@@ -50,7 +50,26 @@ segmenter = pipeline(
 result = segmenter("ultrasound.png", organ_id=4)
 ```
 
-See the model card for the organ-ID mapping and additional usage details.
+Pass the corresponding `organ_id` when the organ is known. If it is omitted,
+the model uses the unknown-organ token (`-1`).
+
+| Organ | `organ_id` |
+| --- | --- |
+| Appendix | `0` |
+| Breast | `1` |
+| Cardiac | `2` |
+| Thyroid | `3` |
+| Fetal / Fetal HC | `4` |
+| Kidney | `5` |
+| Liver | `6` |
+| Testicle | `7` |
+| Unknown | `-1` |
+
+## Dataset Examples
+
+Representative TesticulUS ultrasound images with segmentation-mask overlays:
+
+![TesticulUS representative ultrasound examples](https://huggingface.co/datasets/AImageLab-Zip/TesticulUS/resolve/main/assets/testiculus_previews.png)
 
 ## Citation
 
